@@ -76,6 +76,24 @@ type SupabaseTaskRecord = {
   created_at?: string;
 };
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function isValidSupabaseUuid(value?: string | null) {
+  if (!value) return false;
+  return UUID_REGEX.test(value.trim());
+}
+
+function formatSupabaseError(error: { code?: string; message?: string; details?: string; hint?: string } | null | undefined, action: string) {
+  if (!error) return `${action} failed without a Supabase error payload.`;
+
+  const parts = [`${action} failed.`];
+  if (error.code) parts.push(`Code: ${error.code}`);
+  if (error.message) parts.push(error.message);
+  if (error.details) parts.push(`Details: ${error.details}`);
+  if (error.hint) parts.push(`Hint: ${error.hint}`);
+  return parts.join(" ");
+}
+
 const stageStatusMap: Record<LeadStage, string> = {
   "New Lead": "new",
   "Attempting Contact": "contacting",
@@ -252,27 +270,39 @@ export async function createSupabaseLead(client: SupabaseClient, lead: Lead, use
   // Let Supabase generate the real UUID instead.
   const { id: _temporaryId, ...insertPayload } = payload;
   const { data, error } = await client.from("leads").insert(insertPayload).select("*").single();
+
   if (error) {
-    console.error("SUPABASE CREATE LEAD ERROR:", JSON.stringify(error, null, 2));
-    console.error("SUPABASE INSERT PAYLOAD:", JSON.stringify(insertPayload, null, 2));
-    throw new Error(`${error.code || "SUPABASE_ERROR"}: ${error.message}${error.details ? ` | ${error.details}` : ""}${error.hint ? ` | Hint: ${error.hint}` : ""}`);
+    throw new Error(formatSupabaseError(error, "Creating the lead"));
   }
-  if (lead.activity?.length) {
-    await createSupabaseActivity(client, data.id, lead.activity[0], userId);
+
+  if (!data) {
+    throw new Error("Creating the lead succeeded without returning a row from Supabase.");
   }
+
   return mapSupabaseLeadToLead(data as SupabaseLeadRecord, []);
 }
 
 export async function updateSupabaseLead(client: SupabaseClient, lead: Lead, userId?: string | null) {
+  if (!isValidSupabaseUuid(lead.id)) {
+    throw new Error("Lead cannot be updated in Supabase because the id is not a valid UUID.");
+  }
+
   const payload = mapLeadToSupabaseLead(lead);
   const { data, error } = await client.from("leads").update(payload).eq("id", lead.id).select("*").single();
-  if (error) throw error;
+  if (error) {
+    throw new Error(formatSupabaseError(error, "Updating the lead"));
+  }
+
+  if (!data) {
+    throw new Error("Updating the lead succeeded without returning a row from Supabase.");
+  }
+
   return mapSupabaseLeadToLead(data as SupabaseLeadRecord, []);
 }
 
 export async function deleteSupabaseLead(client: SupabaseClient, leadId: string) {
   const { error } = await client.from("leads").delete().eq("id", leadId);
-  if (error) throw error;
+  if (error) throw new Error(formatSupabaseError(error, "Deleting the lead"));
 }
 
 export async function createSupabaseActivity(client: SupabaseClient, leadId: string, activity: ActivityEntry, userId?: string | null) {
@@ -285,7 +315,7 @@ export async function createSupabaseActivity(client: SupabaseClient, leadId: str
   };
 
   const { error } = await client.from("activities").insert(payload);
-  if (error) throw error;
+  if (error) throw new Error(formatSupabaseError(error, "Creating the activity"));
 }
 
 function normalizeActivityType(type: ActivityEntry["type"]) {

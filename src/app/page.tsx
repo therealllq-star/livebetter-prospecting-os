@@ -32,6 +32,7 @@ import {
   deleteSupabaseLead,
   fetchSupabaseLeads,
   inspectSupabaseLeadRead,
+  isValidSupabaseUuid,
   updateSupabaseLead,
 } from "@/lib/supabase-repository";
 
@@ -271,6 +272,7 @@ export default function Home() {
     }
 
     const id = normalized.id || `lead-${Date.now()}`;
+    const isPersistedLead = isValidSupabaseUuid(normalized.id);
     const toSave: Lead = {
       ...normalized,
       id,
@@ -278,18 +280,21 @@ export default function Home() {
       focusSummary: normalized.remarks || "Ready for the next action",
       activity: normalized.activity.length ? normalized.activity : [{ id: `activity-${Date.now()}`, type: "status", title: "Lead created", details: "New lead added to CRM", createdAt: new Date().toISOString() }],
     };
+
+    let persistedId = id;
     try {
       const client = createClient();
 
-      if (normalized.id) {
+      if (isPersistedLead) {
         const savedLead = await updateSupabaseLead(client, toSave);
+        persistedId = savedLead.id;
         setLeads((prev) =>
           prev.map((lead) => (lead.id === normalized.id ? savedLead : lead))
         );
       } else {
         const savedLead = await createSupabaseLead(client, toSave);
+        persistedId = savedLead.id;
         setLeads((prev) => [savedLead, ...prev]);
-        setSelectedLeadId(savedLead.id);
       }
     } catch (error) {
       console.error("Failed to save lead to Supabase:", error);
@@ -298,8 +303,9 @@ export default function Home() {
       );
       return;
     }
+
     setValidationMessage("");
-    setSelectedLeadId(id);
+    setSelectedLeadId(persistedId);
     setShowModal(false);
     setDraft(emptyLead);
   };
