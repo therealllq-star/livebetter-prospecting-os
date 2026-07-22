@@ -27,7 +27,13 @@ import {
   type LeadStage,
   type ScriptLibrary,
 } from "@/lib/crm";
-import { fetchSupabaseLeads, inspectSupabaseLeadRead } from "@/lib/supabase-repository";
+import {
+  createSupabaseLead,
+  deleteSupabaseLead,
+  fetchSupabaseLeads,
+  inspectSupabaseLeadRead,
+  updateSupabaseLead,
+} from "@/lib/supabase-repository";
 
 const views = [
   "Dashboard",
@@ -116,6 +122,12 @@ export default function Home() {
       }
 
       const leadsFromSupabase = await fetchSupabaseLeads(client);
+      // Use successfully fetched Supabase leads as the Master CRM dataset.
+      setLeads(leadsFromSupabase);
+      if (leadsFromSupabase.length > 0) {
+        setSelectedLeadId(leadsFromSupabase[0].id);
+      }
+
       setSupabaseReadState({
         status: "connected",
         authenticated: true,
@@ -250,7 +262,7 @@ export default function Home() {
     setActiveView("Master CRM");
   };
 
-  const saveDraft = () => {
+  const saveDraft = async () => {
     const normalized = { ...draft, phone: draft.phone.trim() };
     const duplicate = hasDuplicateLead(leads, { ...normalized, id: normalized.id || `lead-${Date.now()}` } as Lead);
     if (duplicate) {
@@ -266,10 +278,25 @@ export default function Home() {
       focusSummary: normalized.remarks || "Ready for the next action",
       activity: normalized.activity.length ? normalized.activity : [{ id: `activity-${Date.now()}`, type: "status", title: "Lead created", details: "New lead added to CRM", createdAt: new Date().toISOString() }],
     };
-    if (normalized.id) {
-      updateLead(normalized.id, toSave);
-    } else {
-      setLeads((prev) => [toSave, ...prev]);
+    try {
+      const client = createClient();
+
+      if (normalized.id) {
+        const savedLead = await updateSupabaseLead(client, toSave);
+        setLeads((prev) =>
+          prev.map((lead) => (lead.id === normalized.id ? savedLead : lead))
+        );
+      } else {
+        const savedLead = await createSupabaseLead(client, toSave);
+        setLeads((prev) => [savedLead, ...prev]);
+        setSelectedLeadId(savedLead.id);
+      }
+    } catch (error) {
+      console.error("Failed to save lead to Supabase:", error);
+      setValidationMessage(
+        error instanceof Error ? error.message : "Failed to save lead. Please try again."
+      );
+      return;
     }
     setValidationMessage("");
     setSelectedLeadId(id);
@@ -277,11 +304,24 @@ export default function Home() {
     setDraft(emptyLead);
   };
 
-  const deleteLead = (leadId: string) => {
-    setLeads((prev) => prev.filter((lead) => lead.id !== leadId));
-    if (selectedLeadId === leadId) {
-      const remaining = leads.filter((lead) => lead.id !== leadId);
-      setSelectedLeadId(remaining[0]?.id ?? null);
+  const deleteLead = async (leadId: string) => {
+    try {
+      const client = createClient();
+      await deleteSupabaseLead(client, leadId);
+
+      setLeads((prev) => prev.filter((lead) => lead.id !== leadId));
+
+      if (selectedLeadId === leadId) {
+        const remaining = leads.filter((lead) => lead.id !== leadId);
+        setSelectedLeadId(remaining[0]?.id ?? null);
+      }
+    } catch (error) {
+      console.error("Failed to delete lead from Supabase:", error);
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Failed to delete lead. Please try again."
+      );
     }
   };
 

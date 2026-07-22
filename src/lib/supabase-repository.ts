@@ -248,8 +248,15 @@ function mapActivityTypeFromSupabase(value?: string | null): ActivityEntry["type
 
 export async function createSupabaseLead(client: SupabaseClient, lead: Lead, userId?: string | null) {
   const payload = mapLeadToSupabaseLead(lead);
-  const { data, error } = await client.from("leads").insert(payload).select("*").single();
-  if (error) throw error;
+  // New local leads use temporary IDs like "lead-...".
+  // Let Supabase generate the real UUID instead.
+  const { id: _temporaryId, ...insertPayload } = payload;
+  const { data, error } = await client.from("leads").insert(insertPayload).select("*").single();
+  if (error) {
+    console.error("SUPABASE CREATE LEAD ERROR:", JSON.stringify(error, null, 2));
+    console.error("SUPABASE INSERT PAYLOAD:", JSON.stringify(insertPayload, null, 2));
+    throw new Error(`${error.code || "SUPABASE_ERROR"}: ${error.message}${error.details ? ` | ${error.details}` : ""}${error.hint ? ` | Hint: ${error.hint}` : ""}`);
+  }
   if (lead.activity?.length) {
     await createSupabaseActivity(client, data.id, lead.activity[0], userId);
   }
@@ -261,6 +268,11 @@ export async function updateSupabaseLead(client: SupabaseClient, lead: Lead, use
   const { data, error } = await client.from("leads").update(payload).eq("id", lead.id).select("*").single();
   if (error) throw error;
   return mapSupabaseLeadToLead(data as SupabaseLeadRecord, []);
+}
+
+export async function deleteSupabaseLead(client: SupabaseClient, leadId: string) {
+  const { error } = await client.from("leads").delete().eq("id", leadId);
+  if (error) throw error;
 }
 
 export async function createSupabaseActivity(client: SupabaseClient, leadId: string, activity: ActivityEntry, userId?: string | null) {
