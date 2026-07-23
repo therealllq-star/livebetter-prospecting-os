@@ -338,35 +338,71 @@ export default function Home() {
   const addNoteToLead = async (lead: Lead, details: string) => {
     const note = details.trim();
     if (!note) return;
-    await persistLeadMutation(lead.id, {}, { type: "note", title: "Note added", details: note });
+    try {
+      await persistLeadMutation(lead.id, {}, { type: "note", title: "Note added", details: note });
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Unable to save this note to Supabase."
+      );
+      throw error;
+    }
   };
 
   const scheduleFollowUpForLead = async (lead: Lead, selectedDate: string) => {
-    await persistLeadMutation(
-      lead.id,
-      { stage: "Follow-Up", nextFollowUp: selectedDate, nextAction: `Follow up on ${selectedDate}` },
-      { type: "follow-up", title: "Follow-up scheduled", details: `Next follow-up set for ${selectedDate}` }
-    );
+    try {
+      await persistLeadMutation(
+        lead.id,
+        { stage: "Follow-Up", nextFollowUp: selectedDate, nextAction: `Follow up on ${selectedDate}` },
+        { type: "follow-up", title: "Follow-up scheduled", details: `Next follow-up set for ${selectedDate}` }
+      );
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Unable to schedule this follow-up in Supabase."
+      );
+      throw error;
+    }
   };
 
   const changeLeadGrade = async (lead: Lead, grade: LeadGrade) => {
     if (lead.grade === grade) return;
-    await persistLeadMutation(
-      lead.id,
-      { grade },
-      { type: "status", title: "Grade changed", details: `Grade changed from ${lead.grade} to ${grade}` }
-    );
+    try {
+      await persistLeadMutation(
+        lead.id,
+        { grade },
+        { type: "status", title: "Grade changed", details: `Grade changed from ${lead.grade} to ${grade}` }
+      );
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Unable to persist this grade change to Supabase."
+      );
+      throw error;
+    }
   };
 
   const markLeadAppointment = async (lead: Lead, appointmentDate: string, note?: string) => {
-    const client = createClient();
-    const persistedLead = await persistLeadMutation(
-      lead.id,
-      { stage: "Appointment Set", appointmentDate, nextFollowUp: appointmentDate, nextAction: "Prepare appointment summary" },
-      { type: "appointment", title: "Appointment set", details: note?.trim() ? `Appointment set for ${appointmentDate}. ${note.trim()}` : `Appointment set for ${appointmentDate}` }
-    );
-    await createSupabaseAppointment(client, persistedLead.id, appointmentDate, note?.trim() ?? "");
-    return { ...persistedLead, appointmentDate };
+    try {
+      const client = createClient();
+      const persistedLead = await persistLeadMutation(
+        lead.id,
+        { stage: "Appointment Set", appointmentDate, nextFollowUp: appointmentDate, nextAction: "Prepare appointment summary" },
+        { type: "appointment", title: "Appointment set", details: note?.trim() ? `Appointment set for ${appointmentDate}. ${note.trim()}` : `Appointment set for ${appointmentDate}` }
+      );
+      await createSupabaseAppointment(client, persistedLead.id, appointmentDate, note?.trim() ?? "");
+      return { ...persistedLead, appointmentDate };
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Unable to persist this appointment to Supabase."
+      );
+      throw error;
+    }
   };
 
   const persistLeadMutation = async (

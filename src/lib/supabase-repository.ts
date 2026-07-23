@@ -3,6 +3,9 @@ import { type Lead, type LeadGrade, type LeadStage, type ActivityEntry } from "@
 
 type SupabaseClient = ReturnType<typeof createClient>;
 
+const LEAD_ID_BATCH_SIZE = 100;
+const PAGE_SIZE = 1000;
+
 type SupabaseLeadRecord = {
   id?: string;
   created_at?: string;
@@ -223,13 +226,42 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
   let activityRows: SupabaseActivityRecord[] = [];
   let appointmentRows: SupabaseAppointmentRecord[] = [];
   if (leadIds.length) {
-    const { data, error: activityError } = await client.from("activities").select("*").in("lead_id", leadIds).order("created_at", { ascending: false });
-    if (activityError) throw new Error(formatSupabaseError(activityError, "Reading lead activities"));
-    activityRows = (data ?? []) as SupabaseActivityRecord[];
+    for (let index = 0; index < leadIds.length; index += LEAD_ID_BATCH_SIZE) {
+      const leadIdBatch = leadIds.slice(index, index + LEAD_ID_BATCH_SIZE);
 
-    const { data: appointmentData, error: appointmentError } = await client.from("appointments").select("*").in("lead_id", leadIds).order("appointment_time", { ascending: false });
-    if (!appointmentError) {
-      appointmentRows = (appointmentData ?? []) as SupabaseAppointmentRecord[];
+      for (let page = 0; ; page += 1) {
+        const from = page * PAGE_SIZE;
+        const to = from + PAGE_SIZE - 1;
+        const { data, error: activityError } = await client
+          .from("activities")
+          .select("*")
+          .in("lead_id", leadIdBatch)
+          .order("created_at", { ascending: false })
+          .range(from, to);
+
+        if (activityError) throw new Error(formatSupabaseError(activityError, "Reading lead activities"));
+
+        const batchRows = (data ?? []) as SupabaseActivityRecord[];
+        activityRows.push(...batchRows);
+        if (batchRows.length < PAGE_SIZE) break;
+      }
+
+      for (let page = 0; ; page += 1) {
+        const from = page * PAGE_SIZE;
+        const to = from + PAGE_SIZE - 1;
+        const { data: appointmentData, error: appointmentError } = await client
+          .from("appointments")
+          .select("*")
+          .in("lead_id", leadIdBatch)
+          .order("appointment_time", { ascending: false })
+          .range(from, to);
+
+        if (appointmentError) break;
+
+        const batchRows = (appointmentData ?? []) as SupabaseAppointmentRecord[];
+        appointmentRows.push(...batchRows);
+        if (batchRows.length < PAGE_SIZE) break;
+      }
     }
   }
 
