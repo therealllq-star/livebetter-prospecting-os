@@ -68,6 +68,10 @@ export default function Home() {
   const [detailNoteInput, setDetailNoteInput] = useState("");
   const [validationMessage, setValidationMessage] = useState("");
   const [timelineError, setTimelineError] = useState<string | null>(null);
+  const [aiLeoPrompt, setAiLeoPrompt] = useState("");
+  const [aiLeoResponse, setAiLeoResponse] = useState("");
+  const [aiLeoError, setAiLeoError] = useState<string | null>(null);
+  const [isAiLeoLoading, setIsAiLeoLoading] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [supabaseReadState, setSupabaseReadState] = useState<{
@@ -202,6 +206,13 @@ export default function Home() {
   const hasSupabaseError = authChecked && isAuthenticated && supabaseReadState.status === "error";
   const hasNoSupabaseLeads = authChecked && isAuthenticated && supabaseReadState.status === "connected" && leads.length === 0;
 
+  useEffect(() => {
+    setAiLeoPrompt("");
+    setAiLeoResponse("");
+    setAiLeoError(null);
+    setIsAiLeoLoading(false);
+  }, [selectedLeadId]);
+
   const formatDateOnly = (date: Date) => {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -335,6 +346,68 @@ export default function Home() {
 
   const sortActivitiesNewestFirst = (activities: ActivityEntry[]) => {
     return [...activities].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+  };
+
+  const buildAiLeoLeadContext = (lead: Lead) => {
+    const timeline = [...lead.activity]
+      .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime())
+      .map((entry) => `${formatDate(entry.createdAt)} | ${entry.title} | ${entry.details}`);
+
+    return {
+      name: lead.name,
+      grade: lead.grade,
+      stage: lead.stage,
+      source: lead.source,
+      campaign: lead.campaign,
+      remarks: lead.remarks,
+      nextFollowUp: lead.nextFollowUp,
+      nextAction: lead.nextAction,
+      appointmentDate: lead.appointmentDate,
+      focusSummary: lead.focusSummary ?? "",
+      timeline,
+    };
+  };
+
+  const askAiLeo = async (prompt: string) => {
+    if (!selectedLead) return;
+
+    setIsAiLeoLoading(true);
+    setAiLeoError(null);
+
+    try {
+      const response = await fetch("/api/ai-leo", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          prompt,
+          leadContext: buildAiLeoLeadContext(selectedLead),
+        }),
+      });
+
+      const payload = (await response.json().catch(() => null)) as { response?: string; error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error || "AI Leo could not complete this request.");
+      }
+
+      setAiLeoResponse(payload?.response || "AI Leo returned an empty response.");
+    } catch (error) {
+      setAiLeoResponse("");
+      setAiLeoError(
+        error instanceof Error
+          ? error.message
+          : "AI Leo could not complete this request.",
+      );
+    } finally {
+      setIsAiLeoLoading(false);
+    }
+  };
+
+  const submitAiLeoPrompt = async () => {
+    const prompt = aiLeoPrompt.trim();
+    if (!prompt) return;
+    await askAiLeo(prompt);
   };
 
   const addNoteToLead = async (lead: Lead, details: string) => {
@@ -1311,6 +1384,36 @@ export default function Home() {
                       <button onClick={() => { void handleLeadAction(selectedLead.id, "NOT INTERESTED"); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Not Interested</button>
                       <button onClick={() => { void handleLeadAction(selectedLead.id, "INVALID NUMBER"); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Invalid Number</button>
                     </div>
+                  </div>
+                  <div className="rounded-2xl border border-[#e7e0d0] bg-white p-4">
+                    <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">AI Leo</p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button onClick={() => { void askAiLeo("What should I do next for this lead?"); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">What should I do next?</button>
+                      <button onClick={() => { void askAiLeo("Draft a WhatsApp follow-up for this lead."); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Draft WhatsApp</button>
+                      <button onClick={() => { void askAiLeo("Prepare my call for this lead."); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Prepare My Call</button>
+                    </div>
+                    <div className="mt-3 flex flex-col gap-3">
+                      <textarea
+                        value={aiLeoPrompt}
+                        onChange={(event) => setAiLeoPrompt(event.target.value)}
+                        placeholder="Ask AI Leo about this lead..."
+                        className="min-h-[96px] w-full rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2 text-sm"
+                      />
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-xs text-[#5f5a52]">AI Leo uses only this lead&apos;s CRM context and timeline.</p>
+                        <button
+                          onClick={() => {
+                            void submitAiLeoPrompt();
+                          }}
+                          disabled={isAiLeoLoading || !aiLeoPrompt.trim()}
+                          className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {isAiLeoLoading ? "Thinking..." : "Ask AI Leo"}
+                        </button>
+                      </div>
+                    </div>
+                    {aiLeoError ? <p className="mt-3 text-sm text-[#b08c2c]">{aiLeoError}</p> : null}
+                    {aiLeoResponse ? <div className="mt-3 whitespace-pre-wrap rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-3 text-sm text-[#171717]">{aiLeoResponse}</div> : null}
                   </div>
                 </div>
               </div>
