@@ -107,6 +107,20 @@ function buildLeadContextText(leadContext: AiLeoLeadContext) {
   ].join("\n");
 }
 
+function sanitizeResponseText(text: string) {
+  return text
+    // Keep numeric ranges intact, but normalize their surrounding whitespace.
+    .replace(/(\d)\s*–\s*(\d)/g, "$1–$2")
+    // Model prose uses these as punctuation; use a normal comma instead.
+    .replace(/\s*[—–]\s*/g, ", ")
+    .replace(/\s+,/g, ",")
+    .replace(/,\s*,+/g, ",")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
 function extractResponseText(payload: unknown) {
   if (!payload || typeof payload !== "object") return "";
 
@@ -207,7 +221,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: errorMessage }, { status: 502 });
   }
 
-  const responseText = extractResponseText(payload);
+  const responseText = sanitizeResponseText(extractResponseText(payload));
   if (!responseText) {
     return NextResponse.json(
       { error: "OpenAI returned an empty response." },
