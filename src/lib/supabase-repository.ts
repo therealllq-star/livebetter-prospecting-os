@@ -5,6 +5,7 @@ type SupabaseClient = ReturnType<typeof createClient>;
 
 const LEAD_ID_BATCH_SIZE = 100;
 const PAGE_SIZE = 1000;
+const APPOINTMENT_REQUEST_TIMEOUT_MS = 5000;
 
 type SupabaseLeadRecord = {
   id?: string;
@@ -251,15 +252,33 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
       for (let page = 0; ; page += 1) {
         const from = page * PAGE_SIZE;
         const to = from + PAGE_SIZE - 1;
-        const { data: appointmentData, error: appointmentError } = await client
-          .from("appointments")
-          .select("*")
-          .in("lead_id", leadIdBatch)
-          .range(from, to);
+        const appointmentAbortController = new AbortController();
+        const timeoutId = setTimeout(() => {
+          appointmentAbortController.abort();
+        }, APPOINTMENT_REQUEST_TIMEOUT_MS);
+
+        let appointmentData: SupabaseAppointmentRecord[] | null = null;
+        let appointmentError: { code?: string; message?: string; details?: string; hint?: string } | null = null;
+
+        try {
+          const result = await client
+            .from("appointments")
+            .select("*")
+            .in("lead_id", leadIdBatch)
+            .range(from, to)
+            .abortSignal(appointmentAbortController.signal);
+
+          appointmentData = (result.data ?? []) as SupabaseAppointmentRecord[];
+          appointmentError = result.error;
+        } catch {
+          appointmentError = { message: "Appointments request timed out or was aborted." };
+        } finally {
+          clearTimeout(timeoutId);
+        }
 
         if (appointmentError) break;
 
-        const batchRows = (appointmentData ?? []) as SupabaseAppointmentRecord[];
+        const batchRows = appointmentData ?? [];
         appointmentRows.push(...batchRows);
         if (batchRows.length < PAGE_SIZE) break;
       }
