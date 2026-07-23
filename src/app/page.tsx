@@ -100,6 +100,8 @@ export default function Home() {
 
   const loadSupabaseLeads = async () => {
     const client = createClient();
+    const weeLeadNameLower = "wee douglas";
+    const weeLeadIdPrefix = "032f5a50";
     try {
       setSupabaseReadState((prev) => ({
         ...prev,
@@ -135,6 +137,17 @@ export default function Home() {
       }
 
       const leadsFromSupabase = await fetchSupabaseLeads(client);
+      const weeLead = leadsFromSupabase.find((lead) => {
+        const name = lead.name.trim().toLowerCase();
+        const id = String(lead.id ?? "").trim().toLowerCase();
+        return name === weeLeadNameLower || id.startsWith(weeLeadIdPrefix);
+      });
+
+      console.log("[diag] wee-page-post-fetch", {
+        fetchedLeadFound: Boolean(weeLead),
+        fetchedActivityCount: weeLead?.activity.length ?? 0,
+      });
+
       // Use successfully fetched Supabase leads as the Master CRM dataset.
       setLeads(leadsFromSupabase);
 
