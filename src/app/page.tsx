@@ -31,6 +31,7 @@ import {
 import {
   createSupabaseActivity,
   createSupabaseAppointment,
+  deleteSupabaseActivity,
   createSupabaseLead,
   deleteSupabaseLead,
   fetchSupabaseLeads,
@@ -66,6 +67,7 @@ export default function Home() {
   const [queueNoteInput, setQueueNoteInput] = useState("");
   const [detailNoteInput, setDetailNoteInput] = useState("");
   const [validationMessage, setValidationMessage] = useState("");
+  const [timelineError, setTimelineError] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [supabaseReadState, setSupabaseReadState] = useState<{
@@ -100,8 +102,6 @@ export default function Home() {
 
   const loadSupabaseLeads = async () => {
     const client = createClient();
-    const weeLeadNameLower = "wee douglas";
-    const weeLeadIdPrefix = "032f5a50";
     try {
       setSupabaseReadState((prev) => ({
         ...prev,
@@ -137,17 +137,6 @@ export default function Home() {
       }
 
       const leadsFromSupabase = await fetchSupabaseLeads(client);
-      const weeLead = leadsFromSupabase.find((lead) => {
-        const name = lead.name.trim().toLowerCase();
-        const id = String(lead.id ?? "").trim().toLowerCase();
-        return name === weeLeadNameLower || id.startsWith(weeLeadIdPrefix);
-      });
-
-      console.log("[diag] wee-page-post-fetch", {
-        fetchedLeadFound: Boolean(weeLead),
-        fetchedActivityCount: weeLead?.activity.length ?? 0,
-      });
-
       // Use successfully fetched Supabase leads as the Master CRM dataset.
       setLeads(leadsFromSupabase);
 
@@ -467,7 +456,7 @@ export default function Home() {
 
     let activityToAppend: ActivityEntry | null = null;
     if (activity) {
-      activityToAppend = {
+      const activityDraft: ActivityEntry = {
         id: `activity-${Date.now()}`,
         type: activity.type,
         title: activity.title,
@@ -475,7 +464,7 @@ export default function Home() {
         createdAt: now,
         outcome: activity.outcome,
       };
-      await createSupabaseActivity(client, savedLead.id, activityToAppend);
+      activityToAppend = await createSupabaseActivity(client, savedLead.id, activityDraft);
     }
 
       const persistedLead: Lead = {
@@ -577,8 +566,10 @@ export default function Home() {
           });
         }
 
+        const persistedActivities: ActivityEntry[] = [];
         for (const activity of activitiesToCreate) {
-          await createSupabaseActivity(client, savedLead.id, activity);
+          const persistedActivity = await createSupabaseActivity(client, savedLead.id, activity);
+          persistedActivities.push(persistedActivity);
         }
 
           if (toSave.appointmentDate && previousLead?.appointmentDate !== toSave.appointmentDate) {
@@ -589,7 +580,7 @@ export default function Home() {
         setLeads((prev) =>
             prev.map((lead) => (lead.id === normalized.id ? {
               ...savedLead,
-                activity: sortActivitiesNewestFirst([...lead.activity, ...activitiesToCreate]),
+                activity: sortActivitiesNewestFirst([...lead.activity, ...persistedActivities]),
             } : lead))
         );
       } else {
@@ -601,12 +592,12 @@ export default function Home() {
           details: "New lead added to CRM",
           createdAt: new Date().toISOString(),
         };
-        await createSupabaseActivity(client, savedLead.id, createdActivity);
+        const persistedCreatedActivity = await createSupabaseActivity(client, savedLead.id, createdActivity);
           if (toSave.appointmentDate) {
             await createSupabaseAppointment(client, savedLead.id, toSave.appointmentDate, toSave.remarks || "");
           }
         persistedId = savedLead.id;
-          setLeads((prev) => [{ ...savedLead, activity: sortActivitiesNewestFirst([createdActivity]) }, ...prev]);
+          setLeads((prev) => [{ ...savedLead, activity: sortActivitiesNewestFirst([persistedCreatedActivity]) }, ...prev]);
       }
     } catch (error) {
       console.error("Failed to save lead to Supabase:", error);
@@ -639,6 +630,31 @@ export default function Home() {
         error instanceof Error
           ? error.message
           : "Failed to delete lead. Please try again."
+      );
+    }
+  };
+
+  const deleteTimelineActivity = async (leadId: string, activityId: string) => {
+    if (!window.confirm("Delete this timeline activity? This cannot be undone.")) return;
+
+    setTimelineError(null);
+
+    try {
+      const client = createClient();
+      await deleteSupabaseActivity(client, activityId);
+
+      setLeads((prev) =>
+        prev.map((lead) =>
+          lead.id === leadId
+            ? { ...lead, activity: lead.activity.filter((entry) => entry.id !== activityId) }
+            : lead
+        )
+      );
+    } catch (error) {
+      setTimelineError(
+        error instanceof Error
+          ? error.message
+          : "Unable to delete this timeline activity from Supabase."
       );
     }
   };
@@ -1262,12 +1278,23 @@ export default function Home() {
                 <div className="space-y-4">
                   <div className="rounded-2xl border border-[#e7e0d0] bg-white p-4">
                     <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Timeline / activity</p>
+                    {timelineError ? <p className="mt-2 text-sm text-[#b08c2c]">{timelineError}</p> : null}
                     <div className="mt-3 space-y-2">
                       {sortActivitiesNewestFirst(selectedLead.activity).map((entry) => (
                         <div key={entry.id} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-3 text-sm">
                           <div className="flex items-center justify-between">
                             <p className="font-semibold">{entry.title}</p>
-                            <p className="text-xs text-[#5f5a52]">{formatDate(entry.createdAt)}</p>
+                            <div className="flex items-center gap-3">
+                              <p className="text-xs text-[#5f5a52]">{formatDate(entry.createdAt)}</p>
+                              <button
+                                onClick={() => {
+                                  void deleteTimelineActivity(selectedLead.id, entry.id);
+                                }}
+                                className="text-xs font-semibold text-[#5f5a52] underline"
+                              >
+                                Delete
+                              </button>
+                            </div>
                           </div>
                           <p className="mt-1 text-[#5f5a52]">{entry.details}</p>
                         </div>

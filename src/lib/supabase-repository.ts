@@ -219,30 +219,16 @@ export async function inspectSupabaseLeadRead(client: SupabaseClient) {
 }
 
 export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]> {
-  const weeLeadIdPrefix = "032f5a50";
-  const weeLeadNameLower = "wee douglas";
-  const normalize = (value: unknown) => String(value ?? "").trim();
   const { data: leadRows, error: leadError } = await client.from("leads").select("*").order("created_at", { ascending: false });
   if (leadError) throw new Error(formatSupabaseError(leadError, "Reading leads"));
 
   const leadIds = (leadRows ?? []).map((row) => row.id).filter(Boolean);
   let activityRows: SupabaseActivityRecord[] = [];
   let appointmentRows: SupabaseAppointmentRecord[] = [];
-  const weeLeadRow = (leadRows ?? []).find((row) => {
-    const fullName = [row.first_name, row.last_name].filter(Boolean).join(" ").trim().toLowerCase();
-    const rowId = normalize(row.id).toLowerCase();
-    return fullName === weeLeadNameLower || rowId.startsWith(weeLeadIdPrefix);
-  });
 
   if (leadIds.length) {
     for (let index = 0; index < leadIds.length; index += LEAD_ID_BATCH_SIZE) {
       const leadIdBatch = leadIds.slice(index, index + LEAD_ID_BATCH_SIZE);
-      const batchIndex = Math.floor(index / LEAD_ID_BATCH_SIZE);
-      const containsWeeDouglasLeadId = Boolean(
-        weeLeadRow && leadIdBatch.some((id) => normalize(id) === normalize(weeLeadRow.id)),
-      );
-      let batchActivityRowsFetched = 0;
-      let batchPagesFetched = 0;
 
       for (let page = 0; ; page += 1) {
         const from = page * PAGE_SIZE;
@@ -254,57 +240,13 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
           .order("created_at", { ascending: false })
           .range(from, to);
 
-        const willPushRows = !activityError;
-        console.log("[diag] activity-request", {
-          batchIndex,
-          page,
-          from,
-          to,
-          dataType: Array.isArray(data) ? "array" : typeof data,
-          dataLength: Array.isArray(data) ? data.length : null,
-          error: activityError
-            ? {
-                code: activityError.code ?? null,
-                message: activityError.message ?? null,
-                details: activityError.details ?? null,
-                hint: activityError.hint ?? null,
-              }
-            : null,
-          willPushRows,
-        });
-
         if (activityError) throw new Error(formatSupabaseError(activityError, "Reading lead activities"));
 
         const batchRows = (data ?? []) as SupabaseActivityRecord[];
         activityRows.push(...batchRows);
-        batchActivityRowsFetched += batchRows.length;
-        batchPagesFetched += 1;
-
-        if (containsWeeDouglasLeadId) {
-          const containsWeeDouglasActivity = batchRows.some((item) => {
-            const itemLeadId = normalize(item.lead_id).toLowerCase();
-            return itemLeadId.startsWith(weeLeadIdPrefix) || itemLeadId === normalize(weeLeadRow?.id).toLowerCase();
-          });
-
-          console.log("[diag] wee-fetch-page", {
-            page,
-            from,
-            to,
-            returnedRows: batchRows.length,
-            containsWeeDouglasActivity,
-          });
-        }
 
         if (batchRows.length < PAGE_SIZE) break;
       }
-
-      console.log("[diag] wee-fetch-batch", {
-        batchIndex,
-        leadCountInBatch: leadIdBatch.length,
-        containsWeeDouglasLeadId,
-        pagesFetched: batchPagesFetched,
-        rowsFetched: batchActivityRowsFetched,
-      });
 
       for (let page = 0; ; page += 1) {
         const from = page * PAGE_SIZE;
@@ -313,25 +255,9 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
           .from("appointments")
           .select("*")
           .in("lead_id", leadIdBatch)
-          .order("appointment_time", { ascending: false })
           .range(from, to);
 
-        if (appointmentError) {
-          console.log("[diag] appointment-request-error", {
-            batchIndex,
-            page,
-            from,
-            to,
-            leadCountInBatch: leadIdBatch.length,
-            error: {
-              code: appointmentError.code ?? null,
-              message: appointmentError.message ?? null,
-              details: appointmentError.details ?? null,
-              hint: appointmentError.hint ?? null,
-            },
-          });
-          break;
-        }
+        if (appointmentError) break;
 
         const batchRows = (appointmentData ?? []) as SupabaseAppointmentRecord[];
         appointmentRows.push(...batchRows);
@@ -356,42 +282,6 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
     const latestAppointment = appointmentRows.find((item) => item.lead_id === row.id && item.appointment_time)?.appointment_time ?? undefined;
     const mappedLead = mapSupabaseLeadToLead(row as SupabaseLeadRecord, leadActivities, latestAppointment);
     leadsById.set(row.id, mappedLead);
-
-    if (weeLeadRow && normalize(row.id) === normalize(weeLeadRow.id)) {
-      const exactMatchingActivities = activityRows.filter((item) => item.lead_id === row.id);
-      const looseMatchingActivities = activityRows.filter(
-        (item) => normalize(item.lead_id) === normalize(row.id),
-      );
-      const matchingActivitySamples = activityRows
-        .filter((item) => {
-          const itemLeadId = normalize(item.lead_id).toLowerCase();
-          const rowId = normalize(row.id).toLowerCase();
-          return itemLeadId === rowId || itemLeadId.startsWith(weeLeadIdPrefix) || rowId.startsWith(weeLeadIdPrefix);
-        })
-        .slice(0, 10)
-        .map((item) => ({
-          id: item.id,
-          lead_id: item.lead_id,
-          activity_type: item.activity_type,
-          description: item.description,
-          created_at: item.created_at,
-        }));
-
-      console.log("[diag] wee-fetch-summary", {
-        leadName: [row.first_name, row.last_name].filter(Boolean).join(" ").trim(),
-        leadId: {
-          value: row.id,
-          typeof: typeof row.id,
-          stringLength: normalize(row.id).length,
-        },
-        totalLeadRows: (leadRows ?? []).length,
-        totalActivityRowsFetched: activityRows.length,
-        exactMatchingActivities: exactMatchingActivities.length,
-        looseMatchingActivities: looseMatchingActivities.length,
-        matchingActivitySamples,
-        mappedActivityCount: mappedLead.activity.length,
-      });
-    }
   });
 
   return Array.from(leadsById.values());
@@ -457,6 +347,15 @@ export async function deleteSupabaseLead(client: SupabaseClient, leadId: string)
   if (error) throw new Error(formatSupabaseError(error, "Deleting the lead"));
 }
 
+export async function deleteSupabaseActivity(client: SupabaseClient, activityId: string) {
+  if (!isValidSupabaseUuid(activityId)) {
+    throw new Error("This activity is not yet persisted to Supabase.");
+  }
+
+  const { error } = await client.from("activities").delete().eq("id", activityId);
+  if (error) throw new Error(formatSupabaseError(error, "Deleting the activity"));
+}
+
 export async function createSupabaseActivity(client: SupabaseClient, leadId: string, activity: ActivityEntry, userId?: string | null) {
   const payload: SupabaseActivityRecord = {
     lead_id: leadId,
@@ -466,8 +365,22 @@ export async function createSupabaseActivity(client: SupabaseClient, leadId: str
     created_by: userId ?? null,
   };
 
-  const { error } = await client.from("activities").insert(payload);
+  const { data, error } = await client.from("activities").insert(payload).select("*").single();
   if (error) throw new Error(formatSupabaseError(error, "Creating the activity"));
+
+  if (!data) {
+    throw new Error("Creating the activity succeeded without returning a row from Supabase.");
+  }
+
+  const persisted = data as SupabaseActivityRecord;
+  return {
+    id: persisted.id ?? activity.id,
+    type: mapActivityTypeFromSupabase(persisted.activity_type),
+    title: activity.title,
+    details: persisted.description ?? activity.details,
+    createdAt: persisted.created_at ?? activity.createdAt,
+    outcome: activity.outcome,
+  } as ActivityEntry;
 }
 
 function normalizeActivityType(type: ActivityEntry["type"]) {
