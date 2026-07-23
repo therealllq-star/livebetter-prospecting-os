@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 import {
   type ActivityEntry,
-  buildDemoLeads,
   buildWhatsAppLink,
   compareLeadPriority,
   describeOutcome,
@@ -203,6 +202,60 @@ export default function Home() {
   const hasSupabaseError = authChecked && isAuthenticated && supabaseReadState.status === "error";
   const hasNoSupabaseLeads = authChecked && isAuthenticated && supabaseReadState.status === "connected" && leads.length === 0;
 
+  const formatDateOnly = (date: Date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  };
+
+  const nextFollowUpDate = (daysFromToday: number) => {
+    const date = new Date();
+    date.setDate(date.getDate() + daysFromToday);
+    return formatDateOnly(date);
+  };
+
+  const isValidDateOnly = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(new Date(`${value}T00:00:00`).getTime());
+
+  const chooseFollowUpDate = () => {
+    const choice = window.prompt("Follow-up schedule: 1) Tomorrow 2) 3 Days 3) 1 Week 4) Pick Date", "1");
+    if (choice === null) return null;
+    const normalized = choice.trim().toLowerCase();
+
+    if (normalized === "1" || normalized === "tomorrow") return nextFollowUpDate(1);
+    if (normalized === "2" || normalized === "3 days") return nextFollowUpDate(3);
+    if (normalized === "3" || normalized === "1 week") return nextFollowUpDate(7);
+
+    if (normalized === "4" || normalized === "pick date") {
+      const picked = window.prompt("Enter follow-up date (YYYY-MM-DD)", nextFollowUpDate(1));
+      if (!picked) return null;
+      if (!isValidDateOnly(picked.trim())) {
+        alert("Invalid date. Please use YYYY-MM-DD.");
+        return null;
+      }
+      return picked.trim();
+    }
+
+    alert("Invalid option. Please choose 1, 2, 3, or 4.");
+    return null;
+  };
+
+  const chooseAppointmentDate = () => {
+    const picked = window.prompt("Enter appointment date (YYYY-MM-DD)", nextFollowUpDate(3));
+    if (!picked) return null;
+    if (!isValidDateOnly(picked.trim())) {
+      alert("Invalid date. Please use YYYY-MM-DD.");
+      return null;
+    }
+    return picked.trim();
+  };
+
+  const isQueueEligibleLead = (lead: Lead) => {
+    if (lead.stage === "Closed" || lead.stage === "Lost / KIV") return false;
+    if (!lead.nextFollowUp) return false;
+    return isDueToday(lead.nextFollowUp) || isOverdue(lead.nextFollowUp);
+  };
+
   const filteredLeads = useMemo(() => {
     return leads.filter((lead) => {
       const matchesSearch = [lead.name, lead.phone, lead.nextAction, lead.remarks]
@@ -216,8 +269,9 @@ export default function Home() {
     });
   }, [leads, gradeFilter, search, sourceFilter, stageFilter]);
 
-  const sortedPriorityLeads = useMemo(() => [...filteredLeads].sort(compareLeadPriority).slice(0, 5), [filteredLeads]);
-  const todayCalls = useMemo(() => [...filteredLeads].sort(compareLeadPriority).slice(0, 6), [filteredLeads]);
+  const queueLeads = useMemo(() => [...leads].filter(isQueueEligibleLead).sort(compareLeadPriority), [leads]);
+  const sortedPriorityLeads = useMemo(() => queueLeads.slice(0, 5), [queueLeads]);
+  const todayCalls = useMemo(() => queueLeads.slice(0, 6), [queueLeads]);
   const weeklyMetrics = useMemo(() => getWeeklyActivityMetrics(leads), [leads]);
   const focusLead = useMemo(() => leads.find((lead) => lead.id === focusLeadId) ?? todayCalls[0] ?? null, [focusLeadId, leads, todayCalls]);
 
@@ -308,14 +362,14 @@ export default function Home() {
       await createSupabaseActivity(client, savedLead.id, activityToAppend);
     }
 
-    const persistedLead: Lead = {
+      const persistedLead: Lead = {
       ...savedLead,
       lastContact: mergedLead.lastContact,
       lastOutcome: mergedLead.lastOutcome,
       lastOutcomeNotes: mergedLead.lastOutcomeNotes,
       queueReason: mergedLead.queueReason,
       focusSummary: mergedLead.focusSummary,
-      activity: activityToAppend ? [...savedLead.activity, activityToAppend] : savedLead.activity,
+        activity: activityToAppend ? [...currentLead.activity, activityToAppend] : currentLead.activity,
     };
 
     setLeads((prev) => prev.map((lead) => (lead.id === leadId ? persistedLead : lead)));
@@ -361,17 +415,75 @@ export default function Home() {
     let persistedId = id;
     try {
       const client = createClient();
+      const previousLead = leads.find((lead) => lead.id === normalized.id) ?? null;
 
       if (isPersistedLead) {
         const savedLead = await updateSupabaseLead(client, toSave);
+        const activitiesToCreate: ActivityEntry[] = [];
+
+        if (previousLead && previousLead.stage !== toSave.stage) {
+          activitiesToCreate.push({
+            id: `activity-${Date.now()}-stage`,
+            type: "status",
+            title: "Stage changed",
+            details: `Stage updated to ${toSave.stage}`,
+            createdAt: new Date().toISOString(),
+          });
+        }
+
+        if (previousLead && previousLead.grade !== toSave.grade) {
+          activitiesToCreate.push({
+            id: `activity-${Date.now()}-grade`,
+            type: "status",
+            title: "Grade changed",
+            details: `Grade updated to ${toSave.grade}`,
+            createdAt: new Date().toISOString(),
+          });
+        }
+
+        if (previousLead && previousLead.nextFollowUp !== toSave.nextFollowUp && toSave.nextFollowUp) {
+          activitiesToCreate.push({
+            id: `activity-${Date.now()}-followup`,
+            type: "follow-up",
+            title: "Follow-up scheduled",
+            details: `Next follow-up set for ${toSave.nextFollowUp}`,
+            createdAt: new Date().toISOString(),
+          });
+        }
+
+        if (previousLead && previousLead.remarks !== toSave.remarks && toSave.remarks) {
+          activitiesToCreate.push({
+            id: `activity-${Date.now()}-note`,
+            type: "note",
+            title: "Note updated",
+            details: toSave.remarks,
+            createdAt: new Date().toISOString(),
+          });
+        }
+
+        for (const activity of activitiesToCreate) {
+          await createSupabaseActivity(client, savedLead.id, activity);
+        }
+
         persistedId = savedLead.id;
         setLeads((prev) =>
-          prev.map((lead) => (lead.id === normalized.id ? savedLead : lead))
+            prev.map((lead) => (lead.id === normalized.id ? {
+              ...savedLead,
+              activity: [...lead.activity, ...activitiesToCreate],
+            } : lead))
         );
       } else {
         const savedLead = await createSupabaseLead(client, toSave);
+        const createdActivity: ActivityEntry = {
+          id: `activity-${Date.now()}-created`,
+          type: "status",
+          title: "Lead created",
+          details: "New lead added to CRM",
+          createdAt: new Date().toISOString(),
+        };
+        await createSupabaseActivity(client, savedLead.id, createdActivity);
         persistedId = savedLead.id;
-        setLeads((prev) => [savedLead, ...prev]);
+        setLeads((prev) => [{ ...savedLead, activity: [createdActivity] }, ...prev]);
       }
     } catch (error) {
       console.error("Failed to save lead to Supabase:", error);
@@ -408,10 +520,18 @@ export default function Home() {
     }
   };
 
-  const updateSelectedLead = async (updates: Partial<Lead>) => {
+  const updateSelectedLead = async (
+    updates: Partial<Lead>,
+    activity?: {
+      type: ActivityEntry["type"];
+      title: string;
+      details: string;
+      outcome?: LeadOutcome;
+    }
+  ) => {
     if (!selectedLead) return;
     try {
-      await persistLeadMutation(selectedLead.id, updates);
+      await persistLeadMutation(selectedLead.id, updates, activity);
     } catch (error) {
       alert(
         error instanceof Error
@@ -428,57 +548,65 @@ export default function Home() {
     const nextQueueLeadId = todayCalls.find((item) => item.id !== leadId)?.id ?? null;
 
     try {
+      let shouldAdvanceQueue = false;
+      let persistedLead: Lead | null = null;
+
       if (action === "CALL") {
-        await persistLeadMutation(
+        persistedLead = await persistLeadMutation(
           leadId,
           {},
-          { type: "call", title: "Call made", details: `Called ${lead.name}`, outcome: "connected" }
+          { type: "call", title: "Call attempted", details: `Attempted call to ${lead.name}` }
         );
       } else if (action === "WHATSAPP") {
-        await persistLeadMutation(
+        persistedLead = await persistLeadMutation(
           leadId,
           {},
-          { type: "whatsapp", title: "WhatsApp sent", details: `Sent WhatsApp to ${lead.name}`, outcome: "follow-up" }
+          { type: "whatsapp", title: "WhatsApp initiated", details: `Opened WhatsApp for ${lead.name}` }
         );
       } else if (action === "CONNECTED") {
-        await persistLeadMutation(
+        persistedLead = await persistLeadMutation(
           leadId,
-          { stage: "Connected", nextAction: "Capture notes and next follow-up" },
+          { stage: "Connected", nextAction: "Capture notes and set next follow-up" },
           { type: "status", title: "Connected", details: `Connected with ${lead.name}`, outcome: "connected" }
         );
       } else if (action === "NO ANSWER") {
-        const followUpDate = new Date();
-        followUpDate.setDate(followUpDate.getDate() + 2);
-        await persistLeadMutation(
+        persistedLead = await persistLeadMutation(
           leadId,
-          { stage: "Attempting Contact", nextFollowUp: followUpDate.toISOString(), nextAction: "Try again tomorrow" },
-          { type: "follow-up", title: "No answer", details: `No answer from ${lead.name}`, outcome: "no-answer" }
+          { stage: "Attempting Contact", nextFollowUp: nextFollowUpDate(1), nextAction: "Retry contact tomorrow" },
+          { type: "follow-up", title: "Attempted Contact / No Answer", details: `No answer from ${lead.name}`, outcome: "no-answer" }
         );
       } else if (action === "FOLLOW UP") {
-        const followUpDate = new Date();
-        followUpDate.setDate(followUpDate.getDate() + 1);
-        await persistLeadMutation(
+        const selectedDate = chooseFollowUpDate();
+        if (!selectedDate) return;
+
+        const followUpDetails = `Scheduled follow-up for ${selectedDate}`;
+        persistedLead = await persistLeadMutation(
           leadId,
-          { nextFollowUp: followUpDate.toISOString(), nextAction: "Follow up again" },
-          { type: "follow-up", title: "Follow up", details: `Scheduled follow-up for ${lead.name}`, outcome: "follow-up" }
+          { stage: "Follow-Up", nextFollowUp: selectedDate, nextAction: "Follow up as scheduled" },
+          { type: "follow-up", title: "Follow-up scheduled", details: followUpDetails, outcome: "follow-up" }
         );
       } else if (action === "APPOINTMENT SET") {
-        const appointmentDate = new Date();
-        appointmentDate.setDate(appointmentDate.getDate() + 3);
-        await persistLeadMutation(
-          leadId,
-          { stage: "Appointment Set", appointmentDate: appointmentDate.toISOString(), nextAction: "Prepare appointment summary" },
-          { type: "appointment", title: "Appointment set", details: `Appointment set for ${lead.name}`, outcome: "appointment-set" }
+        const appointmentDate = chooseAppointmentDate();
+        if (!appointmentDate) return;
+
+          persistedLead = await persistLeadMutation(
+            leadId,
+          { stage: "Appointment Set", appointmentDate, nextFollowUp: appointmentDate, nextAction: "Prepare appointment summary" },
+          { type: "appointment", title: "Appointment set", details: `Appointment set for ${appointmentDate}`, outcome: "appointment-set" }
         );
       } else if (action === "INVALID NUMBER") {
-        await persistLeadMutation(
+        persistedLead = await persistLeadMutation(
           leadId,
-          { stage: "Lost / KIV", nextAction: "Verify contact details and keep a note" },
+          { stage: "Lost / KIV", nextFollowUp: "", nextAction: "No further action required" },
           { type: "status", title: "Invalid number", details: `Marked ${lead.name} as invalid number`, outcome: "invalid-number" }
         );
       }
 
-      if (focusLeadId === leadId) {
+      if (persistedLead) {
+        shouldAdvanceQueue = !isQueueEligibleLead(persistedLead);
+      }
+
+      if (shouldAdvanceQueue && focusLeadId === leadId) {
         setFocusLeadId(nextQueueLeadId);
       }
     } catch (error) {
@@ -492,20 +620,21 @@ export default function Home() {
 
   const saveOutcome = async () => {
     if (!focusLead) return;
-    const outcome: LeadOutcome = "follow-up";
-    const details = outcomeNotes || "Outcome captured in queue";
+    const details = outcomeNotes.trim();
+
+    if (!details) {
+      alert("Please enter an outcome note before saving.");
+      return;
+    }
 
     try {
       await persistLeadMutation(
         focusLead.id,
+        {},
         {
-          nextAction: "Take the next step from the captured outcome",
-        },
-        {
-          type: "status",
-          title: "Outcome logged",
+            type: "note",
+            title: "Outcome note saved",
           details,
-          outcome,
         }
       );
       setOutcomeNotes("");
@@ -756,9 +885,9 @@ export default function Home() {
                     <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Daily action queue</p>
                     <h3 className="mt-2 text-xl font-semibold">One lead at a time, with the next best action surfaced.</h3>
                   </div>
-                  <div className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-4 py-3 text-sm text-[#5f5a52]">
-                    {todayCalls.length} leads in the queue today
-                  </div>
+                    <div className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-4 py-3 text-sm text-[#5f5a52]">
+                      Showing {todayCalls.length} of {queueLeads.length} leads due today or overdue
+                    </div>
                 </div>
 
                 {focusLead ? (
@@ -1031,10 +1160,22 @@ export default function Home() {
                   <div className="rounded-2xl border border-[#e7e0d0] bg-white p-4">
                     <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Actions</p>
                     <div className="mt-3 flex flex-wrap gap-2">
-                        <button onClick={() => { void updateSelectedLead({ nextAction: "Add note", stage: "Connected" }); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Add Note</button>
-                        <button onClick={() => { void updateSelectedLead({ nextAction: "Schedule follow-up" }); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Schedule Follow-Up</button>
-                        <button onClick={() => { void updateSelectedLead({ grade: selectedLead.grade === "A" ? "B" : "A" }); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Change Grade</button>
-                        <button onClick={() => { void updateSelectedLead({ stage: "Appointment Set" }); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Mark Appointment</button>
+                        <button onClick={() => {
+                          const note = window.prompt("Enter note");
+                          if (!note || !note.trim()) return;
+                          void updateSelectedLead({ nextAction: "Add note" }, { type: "note", title: "Note added", details: note.trim() });
+                        }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Add Note</button>
+                        <button onClick={() => {
+                          const selectedDate = chooseFollowUpDate();
+                          if (!selectedDate) return;
+                          void updateSelectedLead({ nextAction: "Schedule follow-up", stage: "Follow-Up", nextFollowUp: selectedDate }, { type: "follow-up", title: "Follow-up scheduled", details: `Next follow-up set for ${selectedDate}` });
+                        }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Schedule Follow-Up</button>
+                        <button onClick={() => { const nextGrade = selectedLead.grade === "A" ? "B" : "A"; void updateSelectedLead({ grade: nextGrade }, { type: "status", title: "Grade changed", details: `Grade changed to ${nextGrade}` }); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Change Grade</button>
+                        <button onClick={() => {
+                          const appointmentDate = chooseAppointmentDate();
+                          if (!appointmentDate) return;
+                          void updateSelectedLead({ stage: "Appointment Set", appointmentDate, nextFollowUp: appointmentDate }, { type: "appointment", title: "Appointment set", details: `Appointment set for ${appointmentDate}` });
+                        }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Mark Appointment</button>
                     </div>
                   </div>
                 </div>
