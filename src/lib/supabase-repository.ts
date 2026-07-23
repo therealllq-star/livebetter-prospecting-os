@@ -254,6 +254,25 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
           .order("created_at", { ascending: false })
           .range(from, to);
 
+        const willPushRows = !activityError;
+        console.log("[diag] activity-request", {
+          batchIndex,
+          page,
+          from,
+          to,
+          dataType: Array.isArray(data) ? "array" : typeof data,
+          dataLength: Array.isArray(data) ? data.length : null,
+          error: activityError
+            ? {
+                code: activityError.code ?? null,
+                message: activityError.message ?? null,
+                details: activityError.details ?? null,
+                hint: activityError.hint ?? null,
+              }
+            : null,
+          willPushRows,
+        });
+
         if (activityError) throw new Error(formatSupabaseError(activityError, "Reading lead activities"));
 
         const batchRows = (data ?? []) as SupabaseActivityRecord[];
@@ -297,7 +316,22 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
           .order("appointment_time", { ascending: false })
           .range(from, to);
 
-        if (appointmentError) break;
+        if (appointmentError) {
+          console.log("[diag] appointment-request-error", {
+            batchIndex,
+            page,
+            from,
+            to,
+            leadCountInBatch: leadIdBatch.length,
+            error: {
+              code: appointmentError.code ?? null,
+              message: appointmentError.message ?? null,
+              details: appointmentError.details ?? null,
+              hint: appointmentError.hint ?? null,
+            },
+          });
+          break;
+        }
 
         const batchRows = (appointmentData ?? []) as SupabaseAppointmentRecord[];
         appointmentRows.push(...batchRows);
