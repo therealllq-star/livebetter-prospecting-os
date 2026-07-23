@@ -217,19 +217,20 @@ export async function inspectSupabaseLeadRead(client: SupabaseClient) {
 
 export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]> {
   const { data: leadRows, error: leadError } = await client.from("leads").select("*").order("created_at", { ascending: false });
-  if (leadError) throw leadError;
+  if (leadError) throw new Error(formatSupabaseError(leadError, "Reading leads"));
 
   const leadIds = (leadRows ?? []).map((row) => row.id).filter(Boolean);
   let activityRows: SupabaseActivityRecord[] = [];
   let appointmentRows: SupabaseAppointmentRecord[] = [];
   if (leadIds.length) {
     const { data, error: activityError } = await client.from("activities").select("*").in("lead_id", leadIds).order("created_at", { ascending: false });
-    if (activityError) throw activityError;
+    if (activityError) throw new Error(formatSupabaseError(activityError, "Reading lead activities"));
     activityRows = (data ?? []) as SupabaseActivityRecord[];
 
     const { data: appointmentData, error: appointmentError } = await client.from("appointments").select("*").in("lead_id", leadIds).order("appointment_time", { ascending: false });
-    if (appointmentError) throw appointmentError;
-    appointmentRows = (appointmentData ?? []) as SupabaseAppointmentRecord[];
+    if (!appointmentError) {
+      appointmentRows = (appointmentData ?? []) as SupabaseAppointmentRecord[];
+    }
   }
 
   const leadsById = new Map<string, Lead>();
