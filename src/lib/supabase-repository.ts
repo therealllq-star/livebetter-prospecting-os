@@ -163,7 +163,7 @@ export function mapLeadToSupabaseLead(lead: Lead): SupabaseLeadRecord {
   };
 }
 
-export function mapSupabaseLeadToLead(record: SupabaseLeadRecord, activities: ActivityEntry[]): Lead {
+export function mapSupabaseLeadToLead(record: SupabaseLeadRecord, activities: ActivityEntry[], appointmentDate?: string): Lead {
   const grade = temperatureGradeMap[String(record.temperature ?? "WARM").toUpperCase()] ?? "B";
   const stage = statusStageMap[String(record.status ?? "new").toLowerCase()] ?? "New Lead";
   const fullName = [record.first_name, record.last_name].filter(Boolean).join(" ").trim();
@@ -181,7 +181,7 @@ export function mapSupabaseLeadToLead(record: SupabaseLeadRecord, activities: Ac
     nextFollowUp: record.next_action_at ?? "",
     nextAction: record.next_action_type ?? "",
     remarks: record.notes ?? record.motivation ?? "",
-    appointmentDate: "",
+    appointmentDate: appointmentDate ?? "",
     createdDate: record.created_at ?? new Date().toISOString(),
     isDemo: (record.automation_status ?? "") === "demo",
     lastOutcome: undefined,
@@ -221,10 +221,15 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
 
   const leadIds = (leadRows ?? []).map((row) => row.id).filter(Boolean);
   let activityRows: SupabaseActivityRecord[] = [];
+  let appointmentRows: SupabaseAppointmentRecord[] = [];
   if (leadIds.length) {
     const { data, error: activityError } = await client.from("activities").select("*").in("lead_id", leadIds).order("created_at", { ascending: false });
     if (activityError) throw activityError;
     activityRows = (data ?? []) as SupabaseActivityRecord[];
+
+    const { data: appointmentData, error: appointmentError } = await client.from("appointments").select("*").in("lead_id", leadIds).order("appointment_time", { ascending: false });
+    if (appointmentError) throw appointmentError;
+    appointmentRows = (appointmentData ?? []) as SupabaseAppointmentRecord[];
   }
 
   const leadsById = new Map<string, Lead>();
@@ -239,7 +244,8 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
         createdAt: item.created_at ?? new Date().toISOString(),
         outcome: undefined,
       }));
-    leadsById.set(row.id, mapSupabaseLeadToLead(row as SupabaseLeadRecord, leadActivities));
+      const latestAppointment = appointmentRows.find((item) => item.lead_id === row.id && item.appointment_time)?.appointment_time ?? undefined;
+      leadsById.set(row.id, mapSupabaseLeadToLead(row as SupabaseLeadRecord, leadActivities, latestAppointment));
   });
 
   return Array.from(leadsById.values());

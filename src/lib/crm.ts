@@ -346,8 +346,21 @@ export function normalizePhone(value: string) {
   return value.replace(/[^\d+]/g, "");
 }
 
+function normalizeSingaporePhoneDigits(value: string) {
+  const digits = normalizePhone(value).replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.startsWith("65") && digits.length === 10) return digits;
+  if (digits.length === 8) return `65${digits}`;
+  return digits;
+}
+
+export function buildCallLink(phone: string) {
+  const digits = normalizeSingaporePhoneDigits(phone);
+  return digits ? `tel:+${digits}` : "";
+}
+
 export function buildWhatsAppLink(phone: string) {
-  const digits = normalizePhone(phone).replace(/\D/g, "");
+  const digits = normalizeSingaporePhoneDigits(phone);
   return digits ? `https://wa.me/${digits}` : "";
 }
 

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 import {
   type ActivityEntry,
+  buildCallLink,
   buildWhatsAppLink,
   compareLeadPriority,
   describeOutcome,
@@ -29,6 +30,7 @@ import {
 } from "@/lib/crm";
 import {
   createSupabaseActivity,
+  createSupabaseAppointment,
   createSupabaseLead,
   deleteSupabaseLead,
   fetchSupabaseLeads,
@@ -42,7 +44,6 @@ const views = [
   "Daily Queue",
   "Master CRM",
   "Pipeline",
-  "Reconnect",
   "Playbook",
   "Settings",
 ] as const;
@@ -61,9 +62,9 @@ export default function Home() {
   const [draft, setDraft] = useState<Lead>(emptyLead);
   const [showModal, setShowModal] = useState(false);
   const [scriptLibrary, setScriptLibrary] = useState<ScriptLibrary>(scriptDefaults);
-  const [reconnectMessage, setReconnectMessage] = useState("");
-  const [focusLeadId, setFocusLeadId] = useState<string | null>(null);
-  const [outcomeNotes, setOutcomeNotes] = useState("");
+  const [currentQueueLeadId, setCurrentQueueLeadId] = useState<string | null>(null);
+  const [queueNoteInput, setQueueNoteInput] = useState("");
+  const [detailNoteInput, setDetailNoteInput] = useState("");
   const [validationMessage, setValidationMessage] = useState("");
   const [authChecked, setAuthChecked] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -136,9 +137,6 @@ export default function Home() {
       const leadsFromSupabase = await fetchSupabaseLeads(client);
       // Use successfully fetched Supabase leads as the Master CRM dataset.
       setLeads(leadsFromSupabase);
-      if (leadsFromSupabase.length > 0) {
-        setSelectedLeadId(leadsFromSupabase[0].id);
-      }
 
       setSupabaseReadState({
         status: "connected",
@@ -243,18 +241,33 @@ export default function Home() {
   const chooseAppointmentDate = () => {
     const picked = window.prompt("Enter appointment date (YYYY-MM-DD)", nextFollowUpDate(3));
     if (!picked) return null;
-    if (!isValidDateOnly(picked.trim())) {
+    const trimmedDate = picked.trim();
+    if (!isValidDateOnly(trimmedDate)) {
       alert("Invalid date. Please use YYYY-MM-DD.");
       return null;
     }
-    return picked.trim();
+
+    const pickedTime = window.prompt("Optional appointment time (HH:MM)", "");
+    if (!pickedTime) return trimmedDate;
+    const trimmedTime = pickedTime.trim();
+    if (!trimmedTime) return trimmedDate;
+    if (!/^\d{2}:\d{2}$/.test(trimmedTime)) {
+      alert("Invalid time. Please use HH:MM.");
+      return null;
+    }
+
+    return `${trimmedDate}T${trimmedTime}:00`;
   };
 
   const isQueueEligibleLead = (lead: Lead) => {
     if (lead.stage === "Closed" || lead.stage === "Lost / KIV") return false;
-    if (!lead.nextFollowUp) return false;
+    if (!lead.nextFollowUp) return true;
     return isDueToday(lead.nextFollowUp) || isOverdue(lead.nextFollowUp);
   };
+
+  const isOverdueLead = (lead: Lead) => Boolean(lead.nextFollowUp && isOverdue(lead.nextFollowUp));
+  const isDueTodayLead = (lead: Lead) => Boolean(lead.nextFollowUp && isDueToday(lead.nextFollowUp));
+  const isUnscheduledActiveLead = (lead: Lead) => lead.stage !== "Closed" && lead.stage !== "Lost / KIV" && !lead.nextFollowUp;
 
   const filteredLeads = useMemo(() => {
     return leads.filter((lead) => {
@@ -269,11 +282,29 @@ export default function Home() {
     });
   }, [leads, gradeFilter, search, sourceFilter, stageFilter]);
 
-  const queueLeads = useMemo(() => [...leads].filter(isQueueEligibleLead).sort(compareLeadPriority), [leads]);
+  const overdueQueueLeads = useMemo(() => [...leads].filter(isOverdueLead).sort(compareLeadPriority), [leads]);
+  const dueTodayQueueLeads = useMemo(() => [...leads].filter(isDueTodayLead).sort(compareLeadPriority), [leads]);
+  const unscheduledBacklogLeads = useMemo(() => [...leads].filter(isUnscheduledActiveLead).sort(compareLeadPriority), [leads]);
+  const queueLeads = useMemo(
+    () => [...overdueQueueLeads, ...dueTodayQueueLeads, ...unscheduledBacklogLeads],
+    [overdueQueueLeads, dueTodayQueueLeads, unscheduledBacklogLeads]
+  );
   const sortedPriorityLeads = useMemo(() => queueLeads.slice(0, 5), [queueLeads]);
   const todayCalls = useMemo(() => queueLeads.slice(0, 6), [queueLeads]);
   const weeklyMetrics = useMemo(() => getWeeklyActivityMetrics(leads), [leads]);
-  const focusLead = useMemo(() => leads.find((lead) => lead.id === focusLeadId) ?? todayCalls[0] ?? null, [focusLeadId, leads, todayCalls]);
+  const currentQueueLead = useMemo(() => queueLeads.find((lead) => lead.id === currentQueueLeadId) ?? todayCalls[0] ?? null, [currentQueueLeadId, queueLeads, todayCalls]);
+
+  useEffect(() => {
+    if (queueLeads.length === 0) {
+      setCurrentQueueLeadId(null);
+      return;
+    }
+
+    const currentLeadStillEligible = currentQueueLeadId ? queueLeads.some((lead) => lead.id === currentQueueLeadId) : false;
+    if (!currentLeadStillEligible) {
+      setCurrentQueueLeadId(queueLeads[0]?.id ?? null);
+    }
+  }, [currentQueueLeadId, queueLeads]);
 
   const pipelineByStage = useMemo(() => {
     return (["New Lead", "Attempting Contact", "Connected", "Conversation", "Follow-Up", "Appointment Set", "Showflat", "Negotiation", "Closed", "Lost / KIV"] as LeadStage[]).map((stage) => ({
@@ -294,12 +325,48 @@ export default function Home() {
 
   const openLead = (lead: Lead) => {
     setSelectedLeadId(lead.id);
-    setFocusLeadId(lead.id);
-    setActiveView("Daily Queue");
   };
 
   const updateLead = (leadId: string, updates: Partial<Lead>) => {
     setLeads((prev) => prev.map((lead) => (lead.id === leadId ? { ...lead, ...updates } : lead)));
+  };
+
+  const sortActivitiesNewestFirst = (activities: ActivityEntry[]) => {
+    return [...activities].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+  };
+
+  const addNoteToLead = async (lead: Lead, details: string) => {
+    const note = details.trim();
+    if (!note) return;
+    await persistLeadMutation(lead.id, {}, { type: "note", title: "Note added", details: note });
+  };
+
+  const scheduleFollowUpForLead = async (lead: Lead, selectedDate: string) => {
+    await persistLeadMutation(
+      lead.id,
+      { stage: "Follow-Up", nextFollowUp: selectedDate, nextAction: `Follow up on ${selectedDate}` },
+      { type: "follow-up", title: "Follow-up scheduled", details: `Next follow-up set for ${selectedDate}` }
+    );
+  };
+
+  const changeLeadGrade = async (lead: Lead, grade: LeadGrade) => {
+    if (lead.grade === grade) return;
+    await persistLeadMutation(
+      lead.id,
+      { grade },
+      { type: "status", title: "Grade changed", details: `Grade changed from ${lead.grade} to ${grade}` }
+    );
+  };
+
+  const markLeadAppointment = async (lead: Lead, appointmentDate: string, note?: string) => {
+    const client = createClient();
+    const persistedLead = await persistLeadMutation(
+      lead.id,
+      { stage: "Appointment Set", appointmentDate, nextFollowUp: appointmentDate, nextAction: "Prepare appointment summary" },
+      { type: "appointment", title: "Appointment set", details: note?.trim() ? `Appointment set for ${appointmentDate}. ${note.trim()}` : `Appointment set for ${appointmentDate}` }
+    );
+    await createSupabaseAppointment(client, persistedLead.id, appointmentDate, note?.trim() ?? "");
+    return { ...persistedLead, appointmentDate };
   };
 
   const persistLeadMutation = async (
@@ -369,7 +436,7 @@ export default function Home() {
       lastOutcomeNotes: mergedLead.lastOutcomeNotes,
       queueReason: mergedLead.queueReason,
       focusSummary: mergedLead.focusSummary,
-        activity: activityToAppend ? [...currentLead.activity, activityToAppend] : currentLead.activity,
+        activity: activityToAppend ? sortActivitiesNewestFirst([...currentLead.activity, activityToAppend]) : sortActivitiesNewestFirst(currentLead.activity),
     };
 
     setLeads((prev) => prev.map((lead) => (lead.id === leadId ? persistedLead : lead)));
@@ -465,11 +532,15 @@ export default function Home() {
           await createSupabaseActivity(client, savedLead.id, activity);
         }
 
+          if (toSave.appointmentDate && previousLead?.appointmentDate !== toSave.appointmentDate) {
+            await createSupabaseAppointment(client, savedLead.id, toSave.appointmentDate, toSave.remarks || "");
+          }
+
         persistedId = savedLead.id;
         setLeads((prev) =>
             prev.map((lead) => (lead.id === normalized.id ? {
               ...savedLead,
-              activity: [...lead.activity, ...activitiesToCreate],
+                activity: sortActivitiesNewestFirst([...lead.activity, ...activitiesToCreate]),
             } : lead))
         );
       } else {
@@ -482,8 +553,11 @@ export default function Home() {
           createdAt: new Date().toISOString(),
         };
         await createSupabaseActivity(client, savedLead.id, createdActivity);
+          if (toSave.appointmentDate) {
+            await createSupabaseAppointment(client, savedLead.id, toSave.appointmentDate, toSave.remarks || "");
+          }
         persistedId = savedLead.id;
-        setLeads((prev) => [{ ...savedLead, activity: [createdActivity] }, ...prev]);
+          setLeads((prev) => [{ ...savedLead, activity: sortActivitiesNewestFirst([createdActivity]) }, ...prev]);
       }
     } catch (error) {
       console.error("Failed to save lead to Supabase:", error);
@@ -557,12 +631,20 @@ export default function Home() {
           {},
           { type: "call", title: "Call attempted", details: `Attempted call to ${lead.name}` }
         );
+        const callUrl = buildCallLink(lead.phone);
+        if (callUrl) {
+          window.location.href = callUrl;
+        }
       } else if (action === "WHATSAPP") {
         persistedLead = await persistLeadMutation(
           leadId,
           {},
           { type: "whatsapp", title: "WhatsApp initiated", details: `Opened WhatsApp for ${lead.name}` }
         );
+        const whatsAppUrl = buildWhatsAppLink(lead.phone);
+        if (whatsAppUrl) {
+          window.open(whatsAppUrl, "_blank", "noopener,noreferrer");
+        }
       } else if (action === "CONNECTED") {
         persistedLead = await persistLeadMutation(
           leadId,
@@ -589,10 +671,12 @@ export default function Home() {
         const appointmentDate = chooseAppointmentDate();
         if (!appointmentDate) return;
 
-          persistedLead = await persistLeadMutation(
-            leadId,
-          { stage: "Appointment Set", appointmentDate, nextFollowUp: appointmentDate, nextAction: "Prepare appointment summary" },
-          { type: "appointment", title: "Appointment set", details: `Appointment set for ${appointmentDate}`, outcome: "appointment-set" }
+        persistedLead = await markLeadAppointment(lead, appointmentDate);
+      } else if (action === "NOT INTERESTED") {
+        persistedLead = await persistLeadMutation(
+          leadId,
+          { stage: "Lost / KIV", nextFollowUp: "", nextAction: "Not interested" },
+          { type: "status", title: "Not interested", details: `${lead.name} is not interested`, outcome: "kiv" }
         );
       } else if (action === "INVALID NUMBER") {
         persistedLead = await persistLeadMutation(
@@ -606,43 +690,14 @@ export default function Home() {
         shouldAdvanceQueue = !isQueueEligibleLead(persistedLead);
       }
 
-      if (shouldAdvanceQueue && focusLeadId === leadId) {
-        setFocusLeadId(nextQueueLeadId);
+      if (shouldAdvanceQueue && currentQueueLeadId === leadId) {
+        setCurrentQueueLeadId(nextQueueLeadId);
       }
     } catch (error) {
       alert(
         error instanceof Error
           ? error.message
           : "Unable to persist this action to Supabase."
-      );
-    }
-  };
-
-  const saveOutcome = async () => {
-    if (!focusLead) return;
-    const details = outcomeNotes.trim();
-
-    if (!details) {
-      alert("Please enter an outcome note before saving.");
-      return;
-    }
-
-    try {
-      await persistLeadMutation(
-        focusLead.id,
-        {},
-        {
-            type: "note",
-            title: "Outcome note saved",
-          details,
-        }
-      );
-      setOutcomeNotes("");
-    } catch (error) {
-      alert(
-        error instanceof Error
-          ? error.message
-          : "Unable to save this outcome to Supabase."
       );
     }
   };
@@ -788,9 +843,9 @@ export default function Home() {
                           <p>Stage: {lead.stage}</p>
                         </div>
                         <div className="mt-4 flex flex-wrap gap-2">
-                            <button onClick={() => { void handleLeadAction(lead.id, "CALL"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Quick Call</button>
+                            <button onClick={() => { void handleLeadAction(lead.id, "CALL"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Call</button>
                             <button onClick={() => { void handleLeadAction(lead.id, "WHATSAPP"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">WhatsApp</button>
-                            <button onClick={() => { void handleLeadAction(lead.id, "FOLLOW UP"); }} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">Mark Complete</button>
+                            <button onClick={() => { void handleLeadAction(lead.id, "NO ANSWER"); }} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">No Answer</button>
                         </div>
                       </div>
                     ))}
@@ -886,50 +941,78 @@ export default function Home() {
                     <h3 className="mt-2 text-xl font-semibold">One lead at a time, with the next best action surfaced.</h3>
                   </div>
                     <div className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-4 py-3 text-sm text-[#5f5a52]">
-                      Showing {todayCalls.length} of {queueLeads.length} leads due today or overdue
+                      {overdueQueueLeads.length} overdue · {dueTodayQueueLeads.length} due today · {unscheduledBacklogLeads.length} unscheduled
+                      <div className="mt-1 text-xs">Showing next {todayCalls.length} to work</div>
                     </div>
                 </div>
 
-                {focusLead ? (
+                {currentQueueLead ? (
                   <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_0.8fr]">
                     <div className="rounded-[24px] border border-[#e7e0d0] bg-[#fcfaef] p-5">
                       <div className="flex items-center justify-between gap-3">
                         <div>
-                          <p className="text-lg font-semibold">{focusLead.name}</p>
-                          <p className="mt-1 text-sm text-[#5f5a52]">{focusLead.phone} · {focusLead.source}</p>
+                          <p className="text-lg font-semibold">{currentQueueLead.name}</p>
+                          <p className="mt-1 text-sm text-[#5f5a52]">{currentQueueLead.phone} · {currentQueueLead.source}</p>
                         </div>
-                        <div className={`rounded-full border px-3 py-1 text-xs font-semibold ${gradeAccent[focusLead.grade]}`}>{gradeLabels[focusLead.grade]}</div>
+                        <div className={`rounded-full border px-3 py-1 text-xs font-semibold ${gradeAccent[currentQueueLead.grade]}`}>{gradeLabels[currentQueueLead.grade]}</div>
                       </div>
 
                       <div className="mt-4 space-y-3 text-sm text-[#5f5a52]">
-                        <p><span className="font-semibold text-[#171717]">Why this lead is next:</span> {focusLead.queueReason ?? getLeadQueueReason(focusLead)}</p>
-                        <p><span className="font-semibold text-[#171717]">Suggested objective:</span> {getSuggestedObjective(focusLead)}</p>
-                        <p><span className="font-semibold text-[#171717]">Context:</span> {focusLead.remarks || "No context captured yet."}</p>
-                        <p><span className="font-semibold text-[#171717]">Next action:</span> {focusLead.nextAction}</p>
+                        <p><span className="font-semibold text-[#171717]">Why this lead is next:</span> {currentQueueLead.queueReason ?? getLeadQueueReason(currentQueueLead)}</p>
+                        <p><span className="font-semibold text-[#171717]">Suggested objective:</span> {getSuggestedObjective(currentQueueLead)}</p>
+                        <p><span className="font-semibold text-[#171717]">Context:</span> {currentQueueLead.remarks || "No context captured yet."}</p>
+                        <p><span className="font-semibold text-[#171717]">Next action:</span> {currentQueueLead.nextAction || "No next action captured."}</p>
                       </div>
 
-                      <div className="mt-5 flex flex-wrap gap-2">
-                          <button onClick={() => { void handleLeadAction(focusLead.id, "CALL"); }} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">CALL</button>
-                          <button onClick={() => { void handleLeadAction(focusLead.id, "WHATSAPP"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">WHATSAPP</button>
-                          <button onClick={() => { void handleLeadAction(focusLead.id, "CONNECTED"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">CONNECTED</button>
-                          <button onClick={() => { void handleLeadAction(focusLead.id, "NO ANSWER"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">NO ANSWER</button>
-                          <button onClick={() => { void handleLeadAction(focusLead.id, "FOLLOW UP"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">FOLLOW UP</button>
-                          <button onClick={() => { void handleLeadAction(focusLead.id, "APPOINTMENT SET"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">APPOINTMENT SET</button>
-                          <button onClick={() => { void handleLeadAction(focusLead.id, "INVALID NUMBER"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">INVALID NUMBER</button>
+                      <div className="mt-5 space-y-4">
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#5f5a52]">Quick Actions</p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button onClick={() => { void addNoteToLead(currentQueueLead, queueNoteInput).then(() => setQueueNoteInput("")); }} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">Add Note</button>
+                            <button onClick={() => { const selectedDate = chooseFollowUpDate(); if (!selectedDate) return; void scheduleFollowUpForLead(currentQueueLead, selectedDate); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Follow Up</button>
+                            <button onClick={() => { const appointmentDate = chooseAppointmentDate(); if (!appointmentDate) return; const appointmentNote = window.prompt("Optional appointment note", "") ?? ""; void markLeadAppointment(currentQueueLead, appointmentDate, appointmentNote); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Appointment</button>
+                          </div>
+                          <textarea value={queueNoteInput} onChange={(event) => setQueueNoteInput(event.target.value)} className="mt-3 min-h-[96px] w-full rounded-2xl border border-[#e7e0d0] bg-white px-3 py-2 text-sm" placeholder="Add conversation notes or context" />
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {(["A", "B", "C", "D"] as LeadGrade[]).map((grade) => (
+                              <button key={grade} onClick={() => { void changeLeadGrade(currentQueueLead, grade); }} className={`rounded-full border px-3 py-2 text-sm ${currentQueueLead.grade === grade ? gradeAccent[grade] : "border-[#e7e0d0] bg-white"}`}>{grade}</button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#5f5a52]">Contact</p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "CALL"); }} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">Call</button>
+                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "WHATSAPP"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">WhatsApp</button>
+                          </div>
+                        </div>
+
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#5f5a52]">Outcome</p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "CONNECTED"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Connected</button>
+                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "NO ANSWER"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">No Answer</button>
+                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "NOT INTERESTED"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Not Interested</button>
+                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "INVALID NUMBER"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Invalid Number</button>
+                          </div>
+                        </div>
                       </div>
                     </div>
 
                     <div className="space-y-4">
                       <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-4">
-                        <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Capture outcome</p>
-                        <textarea value={outcomeNotes} onChange={(event) => setOutcomeNotes(event.target.value)} className="mt-3 min-h-[100px] w-full rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2" placeholder="What happened on the call?" />
-                          <button onClick={() => { void saveOutcome(); }} className="mt-3 rounded-2xl bg-[#171717] px-4 py-2 text-sm font-semibold text-white">Save outcome</button>
-                      </div>
-                      <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-4">
-                        <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Quick links</p>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {focusLead.phone ? <a href={buildWhatsAppLink(focusLead.phone)} target="_blank" rel="noreferrer" className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Open WhatsApp</a> : null}
-                          <button onClick={() => setActiveView("Master CRM")} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Open CRM</button>
+                        <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Timeline preview</p>
+                        <div className="mt-3 space-y-2">
+                          {sortActivitiesNewestFirst(currentQueueLead.activity).slice(0, 5).map((entry) => (
+                            <div key={entry.id} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-3 text-sm">
+                              <div className="flex items-center justify-between gap-3">
+                                <p className="font-semibold">{entry.title}</p>
+                                <p className="text-xs text-[#5f5a52]">{formatDate(entry.createdAt)}</p>
+                              </div>
+                              <p className="mt-1 text-[#5f5a52]">{entry.details}</p>
+                            </div>
+                          ))}
                         </div>
                       </div>
                     </div>
@@ -954,8 +1037,7 @@ export default function Home() {
                         <p className="text-sm text-[#5f5a52]">{lead.grade} · {lead.stage} · {lead.nextAction}</p>
                       </div>
                       <div className="flex flex-wrap gap-2">
-                        <button onClick={() => setFocusLeadId(lead.id)} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Focus</button>
-                        <button onClick={() => openLead(lead)} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">Open lead</button>
+                          <button onClick={() => openLead(lead)} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">View Lead Detail</button>
                       </div>
                     </div>
                   ))}
@@ -987,43 +1069,6 @@ export default function Home() {
                   </div>
                 </div>
               ))}
-            </div>
-          )}
-
-          {activeView === "Reconnect" && (
-            <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
-              <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
-                <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Reconnect</p>
-                <h3 className="mt-2 text-xl font-semibold">Work through old leads systematically</h3>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {['No contact > 30 days','No contact > 60 days','No contact > 90 days','KIV leads','Old Facebook leads','Old PropertyGuru leads'].map((filter) => <span key={filter} className="rounded-full border border-[#e7e0d0] px-3 py-1 text-sm text-[#5f5a52]">{filter}</span>)}
-                </div>
-                <div className="mt-6 space-y-3">
-                  {leads.filter((lead) => lead.grade === "C" || lead.grade === "D" || isOverdue(lead.nextFollowUp)).slice(0, 5).map((lead) => (
-                    <div key={lead.id} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-4">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <p className="font-semibold">{lead.name}</p>
-                          <p className="text-sm text-[#5f5a52]">Last contact {formatDate(lead.lastContact)}</p>
-                        </div>
-                        <div className={`rounded-full border px-3 py-1 text-xs font-semibold ${gradeAccent[lead.grade]}`}>{gradeLabels[lead.grade]}</div>
-                      </div>
-                      <textarea value={reconnectMessage} onChange={(event) => setReconnectMessage(event.target.value)} className="mt-3 min-h-[100px] w-full rounded-2xl border border-[#e7e0d0] bg-white px-3 py-2" placeholder="Write a reconnect message for this lead" />
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
-                <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Suggested framework</p>
-                <div className="mt-4 space-y-3 text-sm text-[#5f5a52]">
-                  <p>Warm opener</p>
-                  <p>→ Context</p>
-                  <p>→ What changed?</p>
-                  <p>→ Market-based or personal-based reason?</p>
-                  <p>→ Relevant insight</p>
-                  <p>→ Soft next step</p>
-                </div>
-              </div>
             </div>
           )}
 
@@ -1127,6 +1172,29 @@ export default function Home() {
               </div>
               <div className="mt-6 grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
                 <div className="space-y-4 rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-4">
+                  <div className="rounded-2xl border border-[#e7e0d0] bg-white p-4">
+                    <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Quick Actions</p>
+                    <textarea value={detailNoteInput} onChange={(event) => setDetailNoteInput(event.target.value)} className="mt-3 min-h-[96px] w-full rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2 text-sm" placeholder="Add note or conversation memory" />
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button onClick={() => { void addNoteToLead(selectedLead, detailNoteInput).then(() => setDetailNoteInput("")); }} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">Add Note</button>
+                      <button onClick={() => {
+                        const selectedDate = chooseFollowUpDate();
+                        if (!selectedDate) return;
+                        void scheduleFollowUpForLead(selectedLead, selectedDate);
+                      }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Schedule Follow-Up</button>
+                      <button onClick={() => {
+                        const appointmentDate = chooseAppointmentDate();
+                        if (!appointmentDate) return;
+                        const appointmentNote = window.prompt("Optional appointment note", "") ?? "";
+                        void markLeadAppointment(selectedLead, appointmentDate, appointmentNote);
+                      }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Mark Appointment</button>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {(["A", "B", "C", "D"] as LeadGrade[]).map((grade) => (
+                        <button key={grade} onClick={() => { void changeLeadGrade(selectedLead, grade); }} className={`rounded-full border px-3 py-2 text-sm ${selectedLead.grade === grade ? gradeAccent[grade] : "border-[#e7e0d0] bg-white"}`}>{grade}</button>
+                      ))}
+                    </div>
+                  </div>
                   <div>
                     <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Contact</p>
                     <p className="mt-2 font-semibold">{selectedLead.phone}</p>
@@ -1146,7 +1214,7 @@ export default function Home() {
                   <div className="rounded-2xl border border-[#e7e0d0] bg-white p-4">
                     <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Timeline / activity</p>
                     <div className="mt-3 space-y-2">
-                      {selectedLead.activity.map((entry) => (
+                      {sortActivitiesNewestFirst(selectedLead.activity).map((entry) => (
                         <div key={entry.id} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-3 text-sm">
                           <div className="flex items-center justify-between">
                             <p className="font-semibold">{entry.title}</p>
@@ -1160,22 +1228,12 @@ export default function Home() {
                   <div className="rounded-2xl border border-[#e7e0d0] bg-white p-4">
                     <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Actions</p>
                     <div className="mt-3 flex flex-wrap gap-2">
-                        <button onClick={() => {
-                          const note = window.prompt("Enter note");
-                          if (!note || !note.trim()) return;
-                          void updateSelectedLead({ nextAction: "Add note" }, { type: "note", title: "Note added", details: note.trim() });
-                        }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Add Note</button>
-                        <button onClick={() => {
-                          const selectedDate = chooseFollowUpDate();
-                          if (!selectedDate) return;
-                          void updateSelectedLead({ nextAction: "Schedule follow-up", stage: "Follow-Up", nextFollowUp: selectedDate }, { type: "follow-up", title: "Follow-up scheduled", details: `Next follow-up set for ${selectedDate}` });
-                        }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Schedule Follow-Up</button>
-                        <button onClick={() => { const nextGrade = selectedLead.grade === "A" ? "B" : "A"; void updateSelectedLead({ grade: nextGrade }, { type: "status", title: "Grade changed", details: `Grade changed to ${nextGrade}` }); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Change Grade</button>
-                        <button onClick={() => {
-                          const appointmentDate = chooseAppointmentDate();
-                          if (!appointmentDate) return;
-                          void updateSelectedLead({ stage: "Appointment Set", appointmentDate, nextFollowUp: appointmentDate }, { type: "appointment", title: "Appointment set", details: `Appointment set for ${appointmentDate}` });
-                        }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Mark Appointment</button>
+                      <button onClick={() => { void handleLeadAction(selectedLead.id, "CALL"); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Call</button>
+                      <button onClick={() => { void handleLeadAction(selectedLead.id, "WHATSAPP"); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">WhatsApp</button>
+                      <button onClick={() => { void handleLeadAction(selectedLead.id, "CONNECTED"); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Connected</button>
+                      <button onClick={() => { void handleLeadAction(selectedLead.id, "NO ANSWER"); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">No Answer</button>
+                      <button onClick={() => { void handleLeadAction(selectedLead.id, "NOT INTERESTED"); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Not Interested</button>
+                      <button onClick={() => { void handleLeadAction(selectedLead.id, "INVALID NUMBER"); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Invalid Number</button>
                     </div>
                   </div>
                 </div>
