@@ -67,7 +67,7 @@ export default function Home() {
   const [authChecked, setAuthChecked] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [supabaseReadState, setSupabaseReadState] = useState<{
-    status: "idle" | "connected" | "error";
+    status: "idle" | "loading" | "connected" | "error";
     authenticated: boolean;
     leadCount: number;
     rawLeadCount: number;
@@ -99,6 +99,14 @@ export default function Home() {
   const loadSupabaseLeads = async () => {
     const client = createClient();
     try {
+      setSupabaseReadState((prev) => ({
+        ...prev,
+        status: "loading",
+        error: null,
+        errorCode: null,
+        errorMessage: null,
+      }));
+
       const {
         data: { user },
         error: userError,
@@ -107,6 +115,8 @@ export default function Home() {
       const inspection = await inspectSupabaseLeadRead(client);
 
       if (userError || !user || !inspection.sessionExists || !inspection.userExists) {
+        setLeads([]);
+        setSelectedLeadId(null);
         setSupabaseReadState({
           status: "error",
           authenticated: false,
@@ -142,6 +152,8 @@ export default function Home() {
         userExists: inspection.userExists,
       });
     } catch (error) {
+      setLeads([]);
+      setSelectedLeadId(null);
       setSupabaseReadState({
         status: "error",
         authenticated: true,
@@ -171,24 +183,10 @@ export default function Home() {
       const stored = window.localStorage.getItem(getStorageKey());
       if (stored) {
         const parsed = JSON.parse(stored) as { leads?: Lead[]; scripts?: ScriptLibrary };
-        if (parsed.leads?.length) {
-          setLeads(parsed.leads);
-          if (parsed.leads[0]) setSelectedLeadId(parsed.leads[0].id);
-        } else {
-          const demoLeads = buildDemoLeads();
-          setLeads(demoLeads);
-          setSelectedLeadId(demoLeads[0].id);
-        }
         if (parsed.scripts) setScriptLibrary(parsed.scripts);
-      } else {
-        const demoLeads = buildDemoLeads();
-        setLeads(demoLeads);
-        setSelectedLeadId(demoLeads[0].id);
       }
     } catch {
-      const demoLeads = buildDemoLeads();
-      setLeads(demoLeads);
-      setSelectedLeadId(demoLeads[0].id);
+      // Ignore localStorage read errors. Supabase remains the source of truth.
     }
   }, []);
 
@@ -199,6 +197,9 @@ export default function Home() {
   }, [leads, scriptLibrary]);
 
   const selectedLead = leads.find((lead) => lead.id === selectedLeadId) ?? null;
+  const isSupabaseLoading = authChecked && isAuthenticated && (supabaseReadState.status === "idle" || supabaseReadState.status === "loading");
+  const hasSupabaseError = authChecked && isAuthenticated && supabaseReadState.status === "error";
+  const hasNoSupabaseLeads = authChecked && isAuthenticated && supabaseReadState.status === "connected" && leads.length === 0;
 
   const filteredLeads = useMemo(() => {
     return leads.filter((lead) => {
@@ -474,7 +475,7 @@ export default function Home() {
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <div className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-4 py-3 text-sm text-[#5f5a52]">
-                Demo data is enabled locally. Your changes are saved in this browser.
+                  Supabase is the source of truth for authenticated sessions.
               </div>
               <button
                 onClick={async () => {
@@ -487,6 +488,29 @@ export default function Home() {
               </button>
             </div>
           </header>
+
+            {activeView !== "Settings" && isSupabaseLoading ? (
+              <section className="mb-6 rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
+                <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Loading Leads</p>
+                <p className="mt-2 text-sm text-[#5f5a52]">Loading leads from Supabase...</p>
+              </section>
+            ) : null}
+
+            {activeView !== "Settings" && hasSupabaseError ? (
+              <section className="mb-6 rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
+                <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Supabase Read Error</p>
+                <p className="mt-2 text-sm text-[#5f5a52]">{supabaseReadState.error ?? "Unable to load leads from Supabase."}</p>
+                {supabaseReadState.errorCode ? <p className="mt-2 text-sm text-[#5f5a52]">Error code: {supabaseReadState.errorCode}</p> : null}
+                {supabaseReadState.errorMessage ? <p className="mt-2 text-sm text-[#5f5a52]">Error message: {supabaseReadState.errorMessage}</p> : null}
+              </section>
+            ) : null}
+
+            {activeView !== "Settings" && hasNoSupabaseLeads ? (
+              <section className="mb-6 rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
+                <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">No Leads Found</p>
+                <p className="mt-2 text-sm text-[#5f5a52]">No leads were returned from Supabase for this authenticated session.</p>
+              </section>
+            ) : null}
 
           {activeView === "Dashboard" && (
             <div className="space-y-6">
