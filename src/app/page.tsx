@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 import {
+  type ActivityEntry,
   buildDemoLeads,
   buildWhatsAppLink,
   compareLeadPriority,
@@ -28,6 +29,7 @@ import {
   type ScriptLibrary,
 } from "@/lib/crm";
 import {
+  createSupabaseActivity,
   createSupabaseLead,
   deleteSupabaseLead,
   fetchSupabaseLeads,
@@ -246,6 +248,80 @@ export default function Home() {
     setLeads((prev) => prev.map((lead) => (lead.id === leadId ? { ...lead, ...updates } : lead)));
   };
 
+  const persistLeadMutation = async (
+    leadId: string,
+    updates: Partial<Lead>,
+    activity?: {
+      type: ActivityEntry["type"];
+      title: string;
+      details: string;
+      outcome?: LeadOutcome;
+    }
+  ) => {
+    const currentLead = leads.find((lead) => lead.id === leadId);
+    if (!currentLead) {
+      throw new Error("Lead could not be found for this action.");
+    }
+
+    if (!isValidSupabaseUuid(currentLead.id)) {
+      throw new Error("This lead is not yet persisted to Supabase. Save the lead first, then retry this action.");
+    }
+
+    const now = new Date().toISOString();
+    const mergedLead: Lead = {
+      ...currentLead,
+      ...updates,
+    };
+
+    if (activity) {
+      mergedLead.lastContact = now;
+      mergedLead.lastOutcome = activity.outcome ?? mergedLead.lastOutcome;
+      mergedLead.lastOutcomeNotes = activity.details;
+      mergedLead.queueReason = getLeadQueueReason({
+        ...mergedLead,
+        lastOutcome: mergedLead.lastOutcome,
+        lastOutcomeNotes: mergedLead.lastOutcomeNotes,
+      });
+      mergedLead.focusSummary = `${activity.title}: ${activity.details}`;
+    } else {
+      mergedLead.queueReason = getLeadQueueReason({
+        ...mergedLead,
+        lastOutcome: mergedLead.lastOutcome,
+        lastOutcomeNotes: mergedLead.lastOutcomeNotes,
+      });
+      mergedLead.focusSummary = mergedLead.focusSummary || mergedLead.remarks || "Ready for the next action";
+    }
+
+    const client = createClient();
+    const savedLead = await updateSupabaseLead(client, mergedLead);
+
+    let activityToAppend: ActivityEntry | null = null;
+    if (activity) {
+      activityToAppend = {
+        id: `activity-${Date.now()}`,
+        type: activity.type,
+        title: activity.title,
+        details: activity.details,
+        createdAt: now,
+        outcome: activity.outcome,
+      };
+      await createSupabaseActivity(client, savedLead.id, activityToAppend);
+    }
+
+    const persistedLead: Lead = {
+      ...savedLead,
+      lastContact: mergedLead.lastContact,
+      lastOutcome: mergedLead.lastOutcome,
+      lastOutcomeNotes: mergedLead.lastOutcomeNotes,
+      queueReason: mergedLead.queueReason,
+      focusSummary: mergedLead.focusSummary,
+      activity: activityToAppend ? [...savedLead.activity, activityToAppend] : savedLead.activity,
+    };
+
+    setLeads((prev) => prev.map((lead) => (lead.id === leadId ? persistedLead : lead)));
+    return persistedLead;
+  };
+
   const addLead = () => {
     const newLead: Lead = {
       ...emptyLead,
@@ -332,88 +408,114 @@ export default function Home() {
     }
   };
 
-  const quickAction = (leadId: string, action: string, details: string, type: LeadOutcome | null = null) => {
-    setLeads((prev) => prev.map((lead) => (lead.id === leadId ? {
-      ...lead,
-      activity: [
-        ...lead.activity,
-        { id: `activity-${Date.now()}`, type: "status", title: action, details, createdAt: new Date().toISOString(), outcome: type ?? undefined },
-      ],
-      lastContact: new Date().toISOString(),
-      lastOutcome: type ?? lead.lastOutcome,
-      lastOutcomeNotes: details,
-      queueReason: getLeadQueueReason({ ...lead, lastOutcome: type ?? lead.lastOutcome, lastOutcomeNotes: details }),
-      focusSummary: `${action}: ${details}`,
-    } : lead)));
-  };
-
-  const updateSelectedLead = (updates: Partial<Lead>) => {
+  const updateSelectedLead = async (updates: Partial<Lead>) => {
     if (!selectedLead) return;
-    updateLead(selectedLead.id, updates);
+    try {
+      await persistLeadMutation(selectedLead.id, updates);
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Unable to persist the lead update to Supabase."
+      );
+    }
   };
 
-  const handleLeadAction = (leadId: string, action: string) => {
+  const handleLeadAction = async (leadId: string, action: string) => {
     const lead = leads.find((item) => item.id === leadId);
     if (!lead) return;
 
-    if (action === "CALL") {
-      quickAction(leadId, "Call made", `Called ${lead.name}`, "connected");
-      return;
-    }
+    const nextQueueLeadId = todayCalls.find((item) => item.id !== leadId)?.id ?? null;
 
-    if (action === "WHATSAPP") {
-      quickAction(leadId, "WhatsApp sent", `Sent WhatsApp to ${lead.name}`, "follow-up");
-      return;
-    }
+    try {
+      if (action === "CALL") {
+        await persistLeadMutation(
+          leadId,
+          {},
+          { type: "call", title: "Call made", details: `Called ${lead.name}`, outcome: "connected" }
+        );
+      } else if (action === "WHATSAPP") {
+        await persistLeadMutation(
+          leadId,
+          {},
+          { type: "whatsapp", title: "WhatsApp sent", details: `Sent WhatsApp to ${lead.name}`, outcome: "follow-up" }
+        );
+      } else if (action === "CONNECTED") {
+        await persistLeadMutation(
+          leadId,
+          { stage: "Connected", nextAction: "Capture notes and next follow-up" },
+          { type: "status", title: "Connected", details: `Connected with ${lead.name}`, outcome: "connected" }
+        );
+      } else if (action === "NO ANSWER") {
+        const followUpDate = new Date();
+        followUpDate.setDate(followUpDate.getDate() + 2);
+        await persistLeadMutation(
+          leadId,
+          { stage: "Attempting Contact", nextFollowUp: followUpDate.toISOString(), nextAction: "Try again tomorrow" },
+          { type: "follow-up", title: "No answer", details: `No answer from ${lead.name}`, outcome: "no-answer" }
+        );
+      } else if (action === "FOLLOW UP") {
+        const followUpDate = new Date();
+        followUpDate.setDate(followUpDate.getDate() + 1);
+        await persistLeadMutation(
+          leadId,
+          { nextFollowUp: followUpDate.toISOString(), nextAction: "Follow up again" },
+          { type: "follow-up", title: "Follow up", details: `Scheduled follow-up for ${lead.name}`, outcome: "follow-up" }
+        );
+      } else if (action === "APPOINTMENT SET") {
+        const appointmentDate = new Date();
+        appointmentDate.setDate(appointmentDate.getDate() + 3);
+        await persistLeadMutation(
+          leadId,
+          { stage: "Appointment Set", appointmentDate: appointmentDate.toISOString(), nextAction: "Prepare appointment summary" },
+          { type: "appointment", title: "Appointment set", details: `Appointment set for ${lead.name}`, outcome: "appointment-set" }
+        );
+      } else if (action === "INVALID NUMBER") {
+        await persistLeadMutation(
+          leadId,
+          { stage: "Lost / KIV", nextAction: "Verify contact details and keep a note" },
+          { type: "status", title: "Invalid number", details: `Marked ${lead.name} as invalid number`, outcome: "invalid-number" }
+        );
+      }
 
-    if (action === "CONNECTED") {
-      updateLead(leadId, { stage: "Connected", nextAction: "Capture notes and next follow-up" });
-      quickAction(leadId, "Connected", `Connected with ${lead.name}`, "connected");
-      return;
-    }
-
-    if (action === "NO ANSWER") {
-      const followUpDate = new Date();
-      followUpDate.setDate(followUpDate.getDate() + 2);
-      updateLead(leadId, { stage: "Attempting Contact", nextFollowUp: followUpDate.toISOString(), nextAction: "Try again tomorrow" });
-      quickAction(leadId, "No answer", `No answer from ${lead.name}`, "no-answer");
-      return;
-    }
-
-    if (action === "FOLLOW UP") {
-      const followUpDate = new Date();
-      followUpDate.setDate(followUpDate.getDate() + 1);
-      updateLead(leadId, { nextFollowUp: followUpDate.toISOString(), nextAction: "Follow up again" });
-      quickAction(leadId, "Follow up", `Scheduled follow-up for ${lead.name}`, "follow-up");
-      return;
-    }
-
-    if (action === "APPOINTMENT SET") {
-      const appointmentDate = new Date();
-      appointmentDate.setDate(appointmentDate.getDate() + 3);
-      updateLead(leadId, { stage: "Appointment Set", appointmentDate: appointmentDate.toISOString(), nextAction: "Prepare appointment summary" });
-      quickAction(leadId, "Appointment set", `Appointment set for ${lead.name}`, "appointment-set");
-      return;
-    }
-
-    if (action === "INVALID NUMBER") {
-      updateLead(leadId, { stage: "Lost / KIV", nextAction: "Verify contact details and keep a note" });
-      quickAction(leadId, "Invalid number", `Marked ${lead.name} as invalid number`, "invalid-number");
+      if (focusLeadId === leadId) {
+        setFocusLeadId(nextQueueLeadId);
+      }
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Unable to persist this action to Supabase."
+      );
     }
   };
 
-  const saveOutcome = () => {
+  const saveOutcome = async () => {
     if (!focusLead) return;
     const outcome: LeadOutcome = "follow-up";
-    updateLead(focusLead.id, {
-      lastOutcome: outcome,
-      lastOutcomeNotes: outcomeNotes || "Outcome captured in queue",
-      nextAction: "Take the next step from the captured outcome",
-      queueReason: getLeadQueueReason({ ...focusLead, lastOutcome: outcome, lastOutcomeNotes: outcomeNotes || "Outcome captured in queue" }),
-      focusSummary: outcomeNotes || "Outcome captured in queue",
-    });
-    quickAction(focusLead.id, "Outcome logged", outcomeNotes || "Outcome captured in queue", outcome);
-    setOutcomeNotes("");
+    const details = outcomeNotes || "Outcome captured in queue";
+
+    try {
+      await persistLeadMutation(
+        focusLead.id,
+        {
+          nextAction: "Take the next step from the captured outcome",
+        },
+        {
+          type: "status",
+          title: "Outcome logged",
+          details,
+          outcome,
+        }
+      );
+      setOutcomeNotes("");
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Unable to save this outcome to Supabase."
+      );
+    }
   };
 
   const exportData = () => {
@@ -557,9 +659,9 @@ export default function Home() {
                           <p>Stage: {lead.stage}</p>
                         </div>
                         <div className="mt-4 flex flex-wrap gap-2">
-                          <button onClick={() => handleLeadAction(lead.id, "CALL")} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Quick Call</button>
-                          <button onClick={() => handleLeadAction(lead.id, "WHATSAPP")} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">WhatsApp</button>
-                          <button onClick={() => handleLeadAction(lead.id, "FOLLOW UP")} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">Mark Complete</button>
+                            <button onClick={() => { void handleLeadAction(lead.id, "CALL"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Quick Call</button>
+                            <button onClick={() => { void handleLeadAction(lead.id, "WHATSAPP"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">WhatsApp</button>
+                            <button onClick={() => { void handleLeadAction(lead.id, "FOLLOW UP"); }} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">Mark Complete</button>
                         </div>
                       </div>
                     ))}
@@ -678,13 +780,13 @@ export default function Home() {
                       </div>
 
                       <div className="mt-5 flex flex-wrap gap-2">
-                        <button onClick={() => handleLeadAction(focusLead.id, "CALL")} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">CALL</button>
-                        <button onClick={() => handleLeadAction(focusLead.id, "WHATSAPP")} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">WHATSAPP</button>
-                        <button onClick={() => handleLeadAction(focusLead.id, "CONNECTED")} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">CONNECTED</button>
-                        <button onClick={() => handleLeadAction(focusLead.id, "NO ANSWER")} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">NO ANSWER</button>
-                        <button onClick={() => handleLeadAction(focusLead.id, "FOLLOW UP")} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">FOLLOW UP</button>
-                        <button onClick={() => handleLeadAction(focusLead.id, "APPOINTMENT SET")} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">APPOINTMENT SET</button>
-                        <button onClick={() => handleLeadAction(focusLead.id, "INVALID NUMBER")} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">INVALID NUMBER</button>
+                          <button onClick={() => { void handleLeadAction(focusLead.id, "CALL"); }} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">CALL</button>
+                          <button onClick={() => { void handleLeadAction(focusLead.id, "WHATSAPP"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">WHATSAPP</button>
+                          <button onClick={() => { void handleLeadAction(focusLead.id, "CONNECTED"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">CONNECTED</button>
+                          <button onClick={() => { void handleLeadAction(focusLead.id, "NO ANSWER"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">NO ANSWER</button>
+                          <button onClick={() => { void handleLeadAction(focusLead.id, "FOLLOW UP"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">FOLLOW UP</button>
+                          <button onClick={() => { void handleLeadAction(focusLead.id, "APPOINTMENT SET"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">APPOINTMENT SET</button>
+                          <button onClick={() => { void handleLeadAction(focusLead.id, "INVALID NUMBER"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">INVALID NUMBER</button>
                       </div>
                     </div>
 
@@ -692,7 +794,7 @@ export default function Home() {
                       <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-4">
                         <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Capture outcome</p>
                         <textarea value={outcomeNotes} onChange={(event) => setOutcomeNotes(event.target.value)} className="mt-3 min-h-[100px] w-full rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2" placeholder="What happened on the call?" />
-                        <button onClick={saveOutcome} className="mt-3 rounded-2xl bg-[#171717] px-4 py-2 text-sm font-semibold text-white">Save outcome</button>
+                          <button onClick={() => { void saveOutcome(); }} className="mt-3 rounded-2xl bg-[#171717] px-4 py-2 text-sm font-semibold text-white">Save outcome</button>
                       </div>
                       <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-4">
                         <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Quick links</p>
@@ -929,10 +1031,10 @@ export default function Home() {
                   <div className="rounded-2xl border border-[#e7e0d0] bg-white p-4">
                     <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Actions</p>
                     <div className="mt-3 flex flex-wrap gap-2">
-                      <button onClick={() => updateSelectedLead({ nextAction: "Add note", stage: "Connected" })} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Add Note</button>
-                      <button onClick={() => updateSelectedLead({ nextAction: "Schedule follow-up" })} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Schedule Follow-Up</button>
-                      <button onClick={() => updateSelectedLead({ grade: selectedLead.grade === "A" ? "B" : "A" })} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Change Grade</button>
-                      <button onClick={() => updateSelectedLead({ stage: "Appointment Set" })} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Mark Appointment</button>
+                        <button onClick={() => { void updateSelectedLead({ nextAction: "Add note", stage: "Connected" }); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Add Note</button>
+                        <button onClick={() => { void updateSelectedLead({ nextAction: "Schedule follow-up" }); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Schedule Follow-Up</button>
+                        <button onClick={() => { void updateSelectedLead({ grade: selectedLead.grade === "A" ? "B" : "A" }); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Change Grade</button>
+                        <button onClick={() => { void updateSelectedLead({ stage: "Appointment Set" }); }} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Mark Appointment</button>
                     </div>
                   </div>
                 </div>
