@@ -42,6 +42,7 @@ create table if not exists public.fm3_unit_types (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references public.fm3_projects(id) on delete cascade,
   unit_type_code text not null,
+  -- Bedroom cap guards obvious bad ingests while supporting common SG project unit mixes.
   bedroom_count smallint not null check (bedroom_count >= 0 and bedroom_count <= 10),
   bathroom_count smallint check (bathroom_count is null or bathroom_count >= 0),
   size_sqft_min numeric(10, 2),

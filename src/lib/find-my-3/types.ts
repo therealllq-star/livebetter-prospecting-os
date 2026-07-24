@@ -71,7 +71,7 @@ export interface Fm3ProjectMetric {
   updated_at: string;
 }
 
-export type Fm3ProjectMetricInsert = Omit<Fm3ProjectMetric, "id" | "created_at" | "updated_at">;
+export type Fm3ProjectMetricInsert = Omit<Fm3ProjectMetric, "id" | "retrieved_at" | "created_at" | "updated_at">;
 
 export interface Fm3ExternalCache {
   id: string;
@@ -91,7 +91,7 @@ export interface Fm3ExternalCache {
   updated_at: string;
 }
 
-export type Fm3ExternalCacheInsert = Omit<Fm3ExternalCache, "id" | "created_at" | "updated_at">;
+export type Fm3ExternalCacheInsert = Omit<Fm3ExternalCache, "id" | "retrieved_at" | "created_at" | "updated_at">;
 
 export interface Fm3ProjectFoundation {
   project: Fm3Project;
