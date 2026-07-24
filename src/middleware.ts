@@ -2,7 +2,11 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/utils/supabase/middleware";
 
 export async function middleware(request: NextRequest) {
-  if (request.nextUrl.pathname === "/api/leads") {
+  if (
+    request.nextUrl.pathname === "/api/leads" ||
+    request.nextUrl.pathname === "/api/push/dispatch" ||
+    request.nextUrl.pathname === "/sw.js"
+  ) {
     return NextResponse.next();
   }
 

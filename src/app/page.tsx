@@ -67,10 +67,26 @@ type RealtimeLeadInsertRecord = {
   source?: string | null;
 };
 
+type PushEnableState = "idle" | "enabling" | "enabled" | "denied" | "unsupported" | "error";
+
+function urlBase64ToArrayBuffer(base64String: string): ArrayBuffer {
+  const padded = base64String.padEnd(Math.ceil(base64String.length / 4) * 4, "=");
+  const base64 = padded.replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+
+  for (let i = 0; i < rawData.length; i += 1) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+
+  return outputArray.buffer;
+}
+
 export default function Home() {
   const router = useRouter();
   const supabaseClient = useMemo(() => createClient(), []);
   const notifiedLeadIdsRef = useRef<Set<string>>(new Set());
+  const handledDeepLinkLeadIdRef = useRef<string | null>(null);
   const [activeView, setActiveView] = useState<View>("Dashboard");
   const [leads, setLeads] = useState<Lead[]>([]);
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null);
@@ -96,6 +112,10 @@ export default function Home() {
   const [inboundNotifications, setInboundNotifications] = useState<InboundLeadNotification[]>([]);
   const [toastNotificationIds, setToastNotificationIds] = useState<string[]>([]);
   const [showNotificationMenu, setShowNotificationMenu] = useState(false);
+  const [pushEnableState, setPushEnableState] = useState<PushEnableState>("idle");
+  const [pushStatusMessage, setPushStatusMessage] = useState("Not enabled on this device yet.");
+  const [deepLinkLeadId, setDeepLinkLeadId] = useState<string | null>(null);
+  const [deepLinkView, setDeepLinkView] = useState<string | null>(null);
   const [supabaseReadState, setSupabaseReadState] = useState<{
     status: "idle" | "loading" | "connected" | "error";
     authenticated: boolean;
@@ -265,6 +285,59 @@ export default function Home() {
   }, [authChecked, hasInitialLeadLoadCompleted, isAuthenticated, loadSupabaseLeads, supabaseClient]);
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    setDeepLinkLeadId(params.get("leadId"));
+    setDeepLinkView(params.get("view"));
+  }, []);
+
+  useEffect(() => {
+    if (!authChecked || !isAuthenticated || !deepLinkLeadId) {
+      return;
+    }
+
+    if (handledDeepLinkLeadIdRef.current === deepLinkLeadId) {
+      return;
+    }
+
+    const hasLeadInState = leads.some((lead) => lead.id === deepLinkLeadId);
+    if (!hasLeadInState) {
+      return;
+    }
+
+    if (deepLinkView === "Master CRM") {
+      setActiveView("Master CRM");
+    }
+    setSelectedLeadId(deepLinkLeadId);
+    handledDeepLinkLeadIdRef.current = deepLinkLeadId;
+  }, [authChecked, deepLinkLeadId, deepLinkView, isAuthenticated, leads]);
+
+  useEffect(() => {
+    if (!authChecked || !isAuthenticated) {
+      return;
+    }
+
+    if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+      setPushEnableState("unsupported");
+      setPushStatusMessage("Push notifications are not supported on this device/browser.");
+      return;
+    }
+
+    void navigator.serviceWorker
+      .getRegistration("/")
+      .then(async (registration) => {
+        if (!registration) return;
+        const existingSubscription = await registration.pushManager.getSubscription();
+        if (existingSubscription) {
+          setPushEnableState("enabled");
+          setPushStatusMessage("Phone notifications are enabled.");
+        }
+      })
+      .catch(() => {
+        // No-op: setup check failure should not block CRM usage.
+      });
+  }, [authChecked, isAuthenticated]);
+
+  useEffect(() => {
     try {
       const stored = window.localStorage.getItem(getStorageKey());
       if (stored) {
@@ -332,6 +405,70 @@ export default function Home() {
       }
       return next;
     });
+  };
+
+  const enablePhoneNotifications = async () => {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+      setPushEnableState("unsupported");
+      setPushStatusMessage("Push notifications are not supported on this device/browser.");
+      return;
+    }
+
+    const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+    if (!vapidPublicKey) {
+      setPushEnableState("error");
+      setPushStatusMessage("Missing VAPID public key in app configuration.");
+      return;
+    }
+
+    setPushEnableState("enabling");
+    setPushStatusMessage("Requesting permission and registering this device...");
+
+    try {
+      const registration = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+      const permission = await Notification.requestPermission();
+
+      if (permission !== "granted") {
+        setPushEnableState("denied");
+        setPushStatusMessage("Notification permission was denied.");
+        return;
+      }
+
+      const existingSubscription = await registration.pushManager.getSubscription();
+      const subscription =
+        existingSubscription ||
+        (await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToArrayBuffer(vapidPublicKey),
+        }));
+
+      const payload = subscription.toJSON();
+      const response = await fetch("/api/push/subscribe", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          subscription: {
+            endpoint: payload.endpoint,
+            keys: {
+              p256dh: payload.keys?.p256dh,
+              auth: payload.keys?.auth,
+            },
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Unable to save push subscription.");
+      }
+
+      setPushEnableState("enabled");
+      setPushStatusMessage("Phone notifications are enabled.");
+    } catch {
+      setPushEnableState("error");
+      setPushStatusMessage("Unable to enable phone notifications on this device.");
+    }
   };
 
   useEffect(() => {
@@ -1472,6 +1609,23 @@ export default function Home() {
                     ))}
                   </div>
                 ) : null}
+              </div>
+
+              <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
+                <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Phone notifications</p>
+                <h3 className="mt-2 text-xl font-semibold">Enable push alerts for new inbound leads</h3>
+                <p className="mt-4 text-sm text-[#5f5a52]">Enable this once on your installed phone app to receive background notifications for any new lead source.</p>
+                <div className="mt-5 flex flex-wrap items-center gap-3">
+                  <button
+                    onClick={() => { void enablePhoneNotifications(); }}
+                    disabled={pushEnableState === "enabling"}
+                    className="rounded-2xl bg-[#171717] px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {pushEnableState === "enabling" ? "Enabling..." : "Enable phone notifications"}
+                  </button>
+                  <p className="text-sm text-[#5f5a52]">Status: {pushEnableState}</p>
+                </div>
+                <p className="mt-3 text-sm text-[#5f5a52]">{pushStatusMessage}</p>
               </div>
 
               <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
