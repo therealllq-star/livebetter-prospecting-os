@@ -71,7 +71,7 @@ export async function upsertFm3ProjectMetrics(client: SupabaseClient, metrics: F
     .select("*");
 
   if (error) throw error;
-  return data as Fm3ProjectMetric[];
+  return (data ?? []) as Fm3ProjectMetric[];
 }
 
 export async function listFm3ProjectMetricsByProject(client: SupabaseClient, projectId: string): Promise<Fm3ProjectMetric[]> {
