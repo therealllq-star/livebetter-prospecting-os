@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 import {
@@ -51,8 +51,26 @@ const views = [
 
 type View = (typeof views)[number];
 
+type InboundLeadNotification = {
+  id: string;
+  leadId: string;
+  name: string;
+  source: string;
+  createdAt: string;
+  unread: boolean;
+};
+
+type RealtimeLeadInsertRecord = {
+  id?: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  source?: string | null;
+};
+
 export default function Home() {
   const router = useRouter();
+  const supabaseClient = useMemo(() => createClient(), []);
+  const notifiedLeadIdsRef = useRef<Set<string>>(new Set());
   const [activeView, setActiveView] = useState<View>("Dashboard");
   const [leads, setLeads] = useState<Lead[]>([]);
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null);
@@ -74,6 +92,10 @@ export default function Home() {
   const [isAiLeoLoading, setIsAiLeoLoading] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [hasInitialLeadLoadCompleted, setHasInitialLeadLoadCompleted] = useState(false);
+  const [inboundNotifications, setInboundNotifications] = useState<InboundLeadNotification[]>([]);
+  const [toastNotificationIds, setToastNotificationIds] = useState<string[]>([]);
+  const [showNotificationMenu, setShowNotificationMenu] = useState(false);
   const [supabaseReadState, setSupabaseReadState] = useState<{
     status: "idle" | "loading" | "connected" | "error";
     authenticated: boolean;
@@ -88,8 +110,7 @@ export default function Home() {
   }>({ status: "idle", authenticated: false, leadCount: 0, rawLeadCount: 0, leads: [], error: null, errorCode: null, errorMessage: null, sessionExists: false, userExists: false });
 
   useEffect(() => {
-    const client = createClient();
-    Promise.all([client.auth.getSession(), client.auth.getUser()]).then(([sessionResult, userResult]) => {
+    Promise.all([supabaseClient.auth.getSession(), supabaseClient.auth.getUser()]).then(([sessionResult, userResult]) => {
       const session = sessionResult.data.session;
       const user = userResult.data.user;
       const hasSession = Boolean(session && session.access_token);
@@ -102,10 +123,9 @@ export default function Home() {
       }
       setAuthChecked(true);
     });
-  }, [router]);
+  }, [router, supabaseClient]);
 
-  const loadSupabaseLeads = async () => {
-    const client = createClient();
+  const loadSupabaseLeads = useCallback(async (options?: { focusLeadId?: string }) => {
     try {
       setSupabaseReadState((prev) => ({
         ...prev,
@@ -118,9 +138,9 @@ export default function Home() {
       const {
         data: { user },
         error: userError,
-      } = await client.auth.getUser();
+      } = await supabaseClient.auth.getUser();
 
-      const inspection = await inspectSupabaseLeadRead(client);
+      const inspection = await inspectSupabaseLeadRead(supabaseClient);
 
       if (userError || !user || !inspection.sessionExists || !inspection.userExists) {
         setLeads([]);
@@ -140,9 +160,13 @@ export default function Home() {
         return;
       }
 
-      const leadsFromSupabase = await fetchSupabaseLeads(client);
+      const leadsFromSupabase = await fetchSupabaseLeads(supabaseClient);
       // Use successfully fetched Supabase leads as the Master CRM dataset.
       setLeads(leadsFromSupabase);
+      if (options?.focusLeadId) {
+        const focusedLead = leadsFromSupabase.find((lead) => lead.id === options.focusLeadId);
+        if (focusedLead) setSelectedLeadId(focusedLead.id);
+      }
 
       setSupabaseReadState({
         status: "connected",
@@ -172,16 +196,73 @@ export default function Home() {
         userExists: false,
       });
     }
-  };
+  }, [supabaseClient]);
 
   useEffect(() => {
     if (!authChecked || !isAuthenticated) {
+      setHasInitialLeadLoadCompleted(false);
       setSupabaseReadState({ status: "idle", authenticated: false, leadCount: 0, rawLeadCount: 0, leads: [], error: null, errorCode: null, errorMessage: null, sessionExists: false, userExists: false });
       return;
     }
 
-    void loadSupabaseLeads();
+    let isMounted = true;
+    void loadSupabaseLeads().finally(() => {
+      if (isMounted) setHasInitialLeadLoadCompleted(true);
+    });
+
+    return () => {
+      isMounted = false;
+    };
   }, [authChecked, isAuthenticated]);
+
+  useEffect(() => {
+    if (!authChecked || !isAuthenticated || !hasInitialLeadLoadCompleted) {
+      return;
+    }
+
+    const channel = supabaseClient
+      .channel("prospecting-os-leads-insert")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "leads" }, (payload) => {
+        try {
+          const inserted = payload.new as RealtimeLeadInsertRecord;
+          const leadId = inserted.id?.trim();
+          if (!leadId || notifiedLeadIdsRef.current.has(leadId)) {
+            return;
+          }
+
+          notifiedLeadIdsRef.current.add(leadId);
+
+          const fullName = [inserted.first_name, inserted.last_name].filter(Boolean).join(" ").trim() || "Unnamed lead";
+          const source = inserted.source?.trim() || "Other";
+          const notificationId = `${leadId}:${Date.now()}`;
+          const newNotification: InboundLeadNotification = {
+            id: notificationId,
+            leadId,
+            name: fullName,
+            source,
+            createdAt: new Date().toISOString(),
+            unread: true,
+          };
+
+          setInboundNotifications((prev) => [newNotification, ...prev].slice(0, 50));
+          setToastNotificationIds((prev) => [notificationId, ...prev].slice(0, 10));
+
+          // Reconcile via canonical Supabase read + mapping path.
+          void loadSupabaseLeads();
+        } catch (error) {
+          console.error("Realtime leads insert handler failed:", error);
+        }
+      })
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR") {
+          console.error("Realtime channel error for leads insert subscription.");
+        }
+      });
+
+    return () => {
+      void supabaseClient.removeChannel(channel);
+    };
+  }, [authChecked, hasInitialLeadLoadCompleted, isAuthenticated, loadSupabaseLeads, supabaseClient]);
 
   useEffect(() => {
     try {
@@ -202,9 +283,56 @@ export default function Home() {
   }, [leads, scriptLibrary]);
 
   const selectedLead = leads.find((lead) => lead.id === selectedLeadId) ?? null;
+  const unreadNotificationCount = useMemo(() => inboundNotifications.filter((notification) => notification.unread).length, [inboundNotifications]);
+  const activeToastNotifications = useMemo(
+    () => toastNotificationIds
+      .map((id) => inboundNotifications.find((notification) => notification.id === id))
+      .filter((notification): notification is InboundLeadNotification => Boolean(notification)),
+    [inboundNotifications, toastNotificationIds]
+  );
   const isSupabaseLoading = authChecked && isAuthenticated && (supabaseReadState.status === "idle" || supabaseReadState.status === "loading");
   const hasSupabaseError = authChecked && isAuthenticated && supabaseReadState.status === "error";
   const hasNoSupabaseLeads = authChecked && isAuthenticated && supabaseReadState.status === "connected" && leads.length === 0;
+
+  const markNotificationRead = (notificationId: string) => {
+    setInboundNotifications((prev) =>
+      prev.map((notification) =>
+        notification.id === notificationId ? { ...notification, unread: false } : notification
+      )
+    );
+  };
+
+  const dismissToastNotification = (notificationId: string) => {
+    setToastNotificationIds((prev) => prev.filter((id) => id !== notificationId));
+  };
+
+  const viewLeadFromNotification = async (notification: InboundLeadNotification) => {
+    markNotificationRead(notification.id);
+    dismissToastNotification(notification.id);
+    setActiveView("Master CRM");
+    setShowNotificationMenu(false);
+
+    const leadExists = leads.some((lead) => lead.id === notification.leadId);
+    if (leadExists) {
+      setSelectedLeadId(notification.leadId);
+      return;
+    }
+
+    await loadSupabaseLeads({ focusLeadId: notification.leadId });
+  };
+
+  const toggleNotificationMenu = () => {
+    setShowNotificationMenu((prev) => {
+      const next = !prev;
+      if (next) {
+        setInboundNotifications((current) =>
+          current.map((notification) => (notification.unread ? { ...notification, unread: false } : notification))
+        );
+        setToastNotificationIds([]);
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     setAiLeoPrompt("");
@@ -901,6 +1029,43 @@ export default function Home() {
               <div className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-4 py-3 text-sm text-[#5f5a52]">
                   Supabase is the source of truth for authenticated sessions.
               </div>
+              <div className="relative">
+                <button
+                  onClick={toggleNotificationMenu}
+                  className="relative rounded-2xl border border-[#e7e0d0] px-4 py-3 text-sm font-semibold text-[#171717]"
+                >
+                  Notifications
+                  {unreadNotificationCount > 0 ? (
+                    <span className="ml-2 rounded-full bg-[#171717] px-2 py-0.5 text-xs text-white">{unreadNotificationCount}</span>
+                  ) : null}
+                </button>
+                {showNotificationMenu ? (
+                  <div className="absolute right-0 top-[calc(100%+8px)] z-20 w-[320px] rounded-2xl border border-[#e7e0d0] bg-white p-3 shadow-lg">
+                    <p className="px-2 pb-2 text-xs uppercase tracking-[0.2em] text-[#5f5a52]">Inbound leads this session</p>
+                    <div className="max-h-80 space-y-2 overflow-y-auto">
+                      {inboundNotifications.length === 0 ? (
+                        <p className="rounded-xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2 text-sm text-[#5f5a52]">No inbound lead notifications yet.</p>
+                      ) : (
+                        inboundNotifications.map((notification) => (
+                          <div key={notification.id} className="rounded-xl border border-[#e7e0d0] bg-[#fcfaef] p-3">
+                            <p className="text-sm font-semibold text-[#171717]">New inbound lead</p>
+                            <p className="mt-1 text-sm text-[#5f5a52]">{notification.name} · {notification.source}</p>
+                            <div className="mt-2 flex items-center justify-between">
+                              <p className="text-xs text-[#8a847b]">{formatDate(notification.createdAt)}</p>
+                              <button
+                                onClick={() => { void viewLeadFromNotification(notification); }}
+                                className="rounded-full border border-[#e7e0d0] bg-white px-3 py-1 text-xs font-semibold"
+                              >
+                                View Lead
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
               <button
                 onClick={async () => {
                   await createClient().auth.signOut();
@@ -912,6 +1077,31 @@ export default function Home() {
               </button>
             </div>
           </header>
+
+          {activeToastNotifications.length ? (
+            <div className="fixed bottom-5 right-5 z-30 flex w-[320px] flex-col gap-3">
+              {activeToastNotifications.map((notification) => (
+                <section key={notification.id} className="rounded-2xl border border-[#e7e0d0] bg-white p-4 shadow-xl">
+                  <p className="text-sm font-semibold text-[#171717]">New inbound lead</p>
+                  <p className="mt-1 text-sm text-[#5f5a52]">{notification.name} · {notification.source}</p>
+                  <div className="mt-3 flex items-center gap-2">
+                    <button
+                      onClick={() => { void viewLeadFromNotification(notification); }}
+                      className="rounded-full bg-[#171717] px-3 py-1.5 text-xs font-semibold text-white"
+                    >
+                      View Lead
+                    </button>
+                    <button
+                      onClick={() => dismissToastNotification(notification.id)}
+                      className="rounded-full border border-[#e7e0d0] px-3 py-1.5 text-xs font-semibold text-[#171717]"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </section>
+              ))}
+            </div>
+          ) : null}
 
             {activeView !== "Settings" && isSupabaseLoading ? (
               <section className="mb-6 rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
