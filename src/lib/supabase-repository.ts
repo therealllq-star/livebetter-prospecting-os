@@ -65,7 +65,7 @@ type SupabaseActivityRecord = {
 type SupabaseAppointmentRecord = {
   id?: string;
   lead_id?: string;
-  appointment_time?: string | null;
+  appointment_at?: string | null;
   status?: string | null;
   notes?: string | null;
   created_at?: string;
@@ -328,7 +328,7 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
         outcome: undefined,
       }));
 
-    const latestAppointment = appointmentRows.find((item) => item.lead_id === row.id && item.appointment_time)?.appointment_time ?? undefined;
+    const latestAppointment = appointmentRows.find((item) => item.lead_id === row.id && item.appointment_at)?.appointment_at ?? undefined;
     const mappedLead = mapSupabaseLeadToLead(row as SupabaseLeadRecord, leadActivities, latestAppointment);
     leadsById.set(row.id, mappedLead);
   });
@@ -452,9 +452,9 @@ function normalizeActivityType(type: ActivityEntry["type"]) {
 }
 
 export async function createSupabaseAppointment(client: SupabaseClient, leadId: string, appointmentDate: string, notes: string) {
-  const payload: Pick<SupabaseAppointmentRecord, "lead_id" | "appointment_time"> = {
+  const payload: Pick<SupabaseAppointmentRecord, "lead_id" | "appointment_at"> = {
     lead_id: leadId,
-    appointment_time: appointmentDate || null,
+    appointment_at: appointmentDate || null,
   };
 
   const { error } = await client.from("appointments").insert(payload);
