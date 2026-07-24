@@ -328,7 +328,10 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
         outcome: undefined,
       }));
 
-    const latestAppointment = appointmentRows.find((item) => item.lead_id === row.id && item.appointment_at)?.appointment_at ?? undefined;
+    const latestAppointment = appointmentRows
+      .filter((item) => item.lead_id === row.id && item.appointment_at)
+      .map((item) => item.appointment_at as string)
+      .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0];
     const mappedLead = mapSupabaseLeadToLead(row as SupabaseLeadRecord, leadActivities, latestAppointment);
     leadsById.set(row.id, mappedLead);
   });
