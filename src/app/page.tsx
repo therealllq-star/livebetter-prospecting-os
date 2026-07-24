@@ -87,6 +87,16 @@ type AppointmentDraft = {
   queueMode: boolean;
 };
 
+type CalendarAppointmentCta = {
+  leadId: string;
+  leadName: string;
+  phone: string;
+  source: string;
+  appointmentDate: string;
+  note: string;
+  location: string;
+};
+
 type PushEnableState = "idle" | "enabling" | "enabled" | "denied" | "unsupported" | "error";
 
 function urlBase64ToArrayBuffer(base64String: string): ArrayBuffer {
@@ -142,6 +152,7 @@ export default function Home() {
   const [isMasterLeadDrawerOpen, setIsMasterLeadDrawerOpen] = useState(false);
   const [showAppointmentModal, setShowAppointmentModal] = useState(false);
   const [appointmentDraft, setAppointmentDraft] = useState<AppointmentDraft | null>(null);
+  const [calendarAppointmentCta, setCalendarAppointmentCta] = useState<CalendarAppointmentCta | null>(null);
   const [completedQueueLeadIds, setCompletedQueueLeadIds] = useState<string[]>([]);
   const [isQueueAiLoading, setIsQueueAiLoading] = useState(false);
   const [queueAiError, setQueueAiError] = useState<string | null>(null);
@@ -599,6 +610,82 @@ export default function Home() {
 
     return `${trimmedDate}T${trimmedTime}:00`;
   };
+  
+  const extractLocationFromText = (value?: string) => {
+    const text = value?.trim();
+    if (!text) return "";
+    const match = text.match(/(?:^|\n)\s*location\s*:\s*(.+)$/im);
+    return match?.[1]?.trim() ?? "";
+  };
+  
+  const formatGoogleCalendarDateTime = (date: Date) => {
+    return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  };
+  
+  const formatGoogleCalendarDateOnly = (date: Date) => {
+    return date.toISOString().slice(0, 10).replace(/-/g, "");
+  };
+
+  const isUpcomingAppointment = (appointmentDate: string) => {
+    const timestamp = new Date(appointmentDate).getTime();
+    return Number.isFinite(timestamp) && timestamp > Date.now();
+  };
+  
+  const buildGoogleCalendarDates = (appointmentDate: string) => {
+    const hasTime = appointmentDate.includes("T");
+    if (hasTime) {
+      const start = new Date(appointmentDate);
+      if (!Number.isNaN(start.getTime())) {
+        const end = new Date(start.getTime() + 60 * 60 * 1000);
+        return `${formatGoogleCalendarDateTime(start)}/${formatGoogleCalendarDateTime(end)}`;
+      }
+    }
+  
+    const dayStart = new Date(`${appointmentDate.slice(0, 10)}T00:00:00Z`);
+    if (!Number.isNaN(dayStart.getTime())) {
+      const nextDay = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+      return `${formatGoogleCalendarDateOnly(dayStart)}/${formatGoogleCalendarDateOnly(nextDay)}`;
+    }
+  
+    const fallbackStart = new Date();
+    const fallbackEnd = new Date(fallbackStart.getTime() + 60 * 60 * 1000);
+    return `${formatGoogleCalendarDateTime(fallbackStart)}/${formatGoogleCalendarDateTime(fallbackEnd)}`;
+  };
+  
+  const buildGoogleCalendarEventUrl = (lead: Lead, appointmentDate: string, options?: { note?: string; location?: string }) => {
+    const title = `Property Appointment — ${lead.name}`;
+    const details: string[] = [`Client: ${lead.name}`];
+  
+    if (lead.phone?.trim()) {
+      details.push(`Phone: ${lead.phone.trim()}`);
+    }
+  
+    if (lead.source?.trim()) {
+      details.push(`Source: ${lead.source.trim()}`);
+    }
+  
+    if (options?.note?.trim()) {
+      details.push(`Notes: ${options.note.trim()}`);
+    }
+  
+    const params = new URLSearchParams({
+      action: "TEMPLATE",
+      text: title,
+      dates: buildGoogleCalendarDates(appointmentDate),
+      details: details.join("\n"),
+    });
+  
+    if (options?.location?.trim()) {
+      params.set("location", options.location.trim());
+    }
+  
+    return `https://calendar.google.com/calendar/render?${params.toString()}`;
+  };
+  
+  const openGoogleCalendarForAppointment = (lead: Lead, appointmentDate: string, options?: { note?: string; location?: string }) => {
+    const url = buildGoogleCalendarEventUrl(lead, appointmentDate, options);
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
 
   const isQueueEligibleLead = (lead: Lead) => {
     if (lead.stage === "Closed" || lead.stage === "Lost / KIV") return false;
@@ -966,6 +1053,17 @@ export default function Home() {
 
     try {
       await markLeadAppointment(lead, appointmentDate, appointmentDraft.note.trim());
+      const savedNote = appointmentDraft.note.trim();
+      const savedLocation = extractLocationFromText(savedNote);
+      setCalendarAppointmentCta({
+        leadId: lead.id,
+        leadName: lead.name,
+        phone: lead.phone,
+        source: lead.source,
+        appointmentDate,
+        note: savedNote,
+        location: savedLocation,
+      });
       const shouldAdvance = appointmentDraft.queueMode;
       setShowAppointmentModal(false);
       setAppointmentDraft(null);
@@ -1597,6 +1695,36 @@ export default function Home() {
               </section>
             ) : null}
 
+            {calendarAppointmentCta ? (
+              <section className="mb-6 rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
+                <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Appointment saved</p>
+                <p className="mt-2 text-sm text-[#5f5a52]">
+                  {calendarAppointmentCta.leadName} · {formatDate(calendarAppointmentCta.appointmentDate)}
+                </p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    onClick={() => {
+                      const lead = leads.find((item) => item.id === calendarAppointmentCta.leadId);
+                      if (!lead) return;
+                      openGoogleCalendarForAppointment(lead, calendarAppointmentCta.appointmentDate, {
+                        note: calendarAppointmentCta.note,
+                        location: calendarAppointmentCta.location,
+                      });
+                    }}
+                    className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white"
+                  >
+                    Add to Google Calendar
+                  </button>
+                  <button
+                    onClick={() => setCalendarAppointmentCta(null)}
+                    className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </section>
+            ) : null}
+
             {activeView !== "Settings" && hasNoSupabaseLeads ? (
               <section className="mb-6 rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
                 <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">No Leads Found</p>
@@ -2095,6 +2223,19 @@ export default function Home() {
                         const appointmentNote = window.prompt("Optional appointment note", "") ?? "";
                         void markLeadAppointment(selectedLead, appointmentDate, appointmentNote);
                       }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Mark Appointment</button>
+                      {selectedLead.appointmentDate && isUpcomingAppointment(selectedLead.appointmentDate) ? (
+                        <button
+                          onClick={() => {
+                            openGoogleCalendarForAppointment(selectedLead, selectedLead.appointmentDate, {
+                              note: selectedLead.remarks,
+                              location: extractLocationFromText(selectedLead.remarks),
+                            });
+                          }}
+                          className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm"
+                        >
+                          Add to Google Calendar
+                        </button>
+                      ) : null}
                     </div>
                     <div className="mt-3 grid gap-3 md:grid-cols-2">
                       <label className="flex flex-col gap-1 text-xs uppercase tracking-[0.2em] text-[#5f5a52]">
