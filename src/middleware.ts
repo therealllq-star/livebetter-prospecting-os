@@ -2,6 +2,10 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/utils/supabase/middleware";
 
 export async function middleware(request: NextRequest) {
+  if (request.nextUrl.pathname === "/api/leads") {
+    return NextResponse.next();
+  }
+
   const { supabase, response } = createClient(request);
   const { data: sessionData } = await supabase.auth.getSession();
   const {
