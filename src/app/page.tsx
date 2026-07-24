@@ -254,7 +254,7 @@ export default function Home() {
   }, [leads, scriptLibrary]);
 
   useEffect(() => {
-    if (activeView === "Find My 3" && isAuthenticated) {
+    if (activeView === "Find My 3" && isAuthenticated && fm3Projects.length === 0 && !fm3Loading) {
       void loadFm3Projects();
     }
   }, [activeView, isAuthenticated]);
@@ -964,6 +964,7 @@ export default function Home() {
                               {fm3Transactions.slice(0, 5).map((tx) => (
                                 <div key={tx.id} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-3 text-sm">
                                   <div className="flex items-center justify-between gap-2">
+                                    {/* All transactions are in SGD (Singapore-only app) */}
                                     <span className="font-semibold">SGD {tx.transacted_price.toLocaleString()}</span>
                                     <span className="text-xs text-[#5f5a52]">{tx.sale_date}</span>
                                   </div>
