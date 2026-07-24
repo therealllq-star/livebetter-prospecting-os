@@ -28,6 +28,20 @@ import {
   type ScriptLibrary,
 } from "@/lib/crm";
 import { fetchSupabaseLeads, inspectSupabaseLeadRead } from "@/lib/supabase-repository";
+import {
+  listFm3Projects,
+  listFm3UnitTypesByProject,
+  listFm3TransactionsByProject,
+  listFm3ProjectMetricsByProject,
+} from "@/lib/find-my-3/repository";
+import type {
+  Fm3Project,
+  Fm3UnitType,
+  Fm3Transaction,
+  Fm3ProjectMetric,
+  Fm3MarketSegment,
+  Fm3Zone,
+} from "@/lib/find-my-3/types";
 
 const views = [
   "Dashboard",
@@ -35,6 +49,7 @@ const views = [
   "Master CRM",
   "Pipeline",
   "Reconnect",
+  "Find My 3",
   "Playbook",
   "Settings",
 ] as const;
@@ -59,6 +74,17 @@ export default function Home() {
   const [validationMessage, setValidationMessage] = useState("");
   const [authChecked, setAuthChecked] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [fm3Projects, setFm3Projects] = useState<Fm3Project[]>([]);
+  const [fm3Loading, setFm3Loading] = useState(false);
+  const [fm3Error, setFm3Error] = useState<string | null>(null);
+  const [fm3SelectedProjectId, setFm3SelectedProjectId] = useState<string | null>(null);
+  const [fm3Shortlist, setFm3Shortlist] = useState<string[]>([]);
+  const [fm3UnitTypes, setFm3UnitTypes] = useState<Fm3UnitType[]>([]);
+  const [fm3Transactions, setFm3Transactions] = useState<Fm3Transaction[]>([]);
+  const [fm3Metrics, setFm3Metrics] = useState<Fm3ProjectMetric[]>([]);
+  const [fm3Search, setFm3Search] = useState("");
+  const [fm3ZoneFilter, setFm3ZoneFilter] = useState<Fm3Zone | "All">("All");
+  const [fm3SegmentFilter, setFm3SegmentFilter] = useState<Fm3MarketSegment | "All">("All");
   const [supabaseReadState, setSupabaseReadState] = useState<{
     status: "idle" | "connected" | "error";
     authenticated: boolean;
@@ -144,6 +170,48 @@ export default function Home() {
     }
   };
 
+  const loadFm3Projects = async () => {
+    setFm3Loading(true);
+    setFm3Error(null);
+    try {
+      const client = createClient();
+      const projects = await listFm3Projects(client);
+      setFm3Projects(projects);
+    } catch (err) {
+      setFm3Error(err instanceof Error ? err.message : "Failed to load projects.");
+    } finally {
+      setFm3Loading(false);
+    }
+  };
+
+  const selectFm3Project = async (project: Fm3Project) => {
+    setFm3SelectedProjectId(project.id);
+    setFm3UnitTypes([]);
+    setFm3Transactions([]);
+    setFm3Metrics([]);
+    try {
+      const client = createClient();
+      const [unitTypes, transactions, metrics] = await Promise.all([
+        listFm3UnitTypesByProject(client, project.id),
+        listFm3TransactionsByProject(client, project.id),
+        listFm3ProjectMetricsByProject(client, project.id),
+      ]);
+      setFm3UnitTypes(unitTypes);
+      setFm3Transactions(transactions);
+      setFm3Metrics(metrics);
+    } catch {
+      // detail load failure is non-fatal — list stays shown
+    }
+  };
+
+  const toggleFm3Shortlist = (projectId: string) => {
+    setFm3Shortlist((prev) => {
+      if (prev.includes(projectId)) return prev.filter((id) => id !== projectId);
+      if (prev.length >= 3) return prev;
+      return [...prev, projectId];
+    });
+  };
+
   useEffect(() => {
     if (!authChecked || !isAuthenticated) {
       setSupabaseReadState({ status: "idle", authenticated: false, leadCount: 0, rawLeadCount: 0, leads: [], error: null, errorCode: null, errorMessage: null, sessionExists: false, userExists: false });
@@ -185,6 +253,12 @@ export default function Home() {
     }
   }, [leads, scriptLibrary]);
 
+  useEffect(() => {
+    if (activeView === "Find My 3" && isAuthenticated) {
+      void loadFm3Projects();
+    }
+  }, [activeView, isAuthenticated]);
+
   const selectedLead = leads.find((lead) => lead.id === selectedLeadId) ?? null;
 
   const filteredLeads = useMemo(() => {
@@ -199,6 +273,18 @@ export default function Home() {
       return matchesSearch && matchesGrade && matchesStage && matchesSource;
     });
   }, [leads, gradeFilter, search, sourceFilter, stageFilter]);
+
+  const filteredFm3Projects = useMemo(() => {
+    return fm3Projects.filter((project) => {
+      const matchesSearch = [project.project_name, project.developer_name, project.address_line, project.planning_area]
+        .join(" ")
+        .toLowerCase()
+        .includes(fm3Search.toLowerCase());
+      const matchesSegment = fm3SegmentFilter === "All" || project.market_segment === fm3SegmentFilter;
+      const matchesZone = fm3ZoneFilter === "All" || project.zone === fm3ZoneFilter;
+      return matchesSearch && matchesSegment && matchesZone;
+    });
+  }, [fm3Projects, fm3Search, fm3SegmentFilter, fm3ZoneFilter]);
 
   const sortedPriorityLeads = useMemo(() => [...filteredLeads].sort(compareLeadPriority).slice(0, 5), [filteredLeads]);
   const todayCalls = useMemo(() => [...filteredLeads].sort(compareLeadPriority).slice(0, 6), [filteredLeads]);
@@ -723,6 +809,205 @@ export default function Home() {
                   <p>→ Soft next step</p>
                 </div>
               </div>
+            </div>
+          )}
+
+          {activeView === "Find My 3" && (
+            <div className="space-y-6">
+              {fm3Shortlist.length > 0 && (
+                <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-4 shadow-sm">
+                  <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Shortlisted ({fm3Shortlist.length}/3)</p>
+                  <div className="mt-3 flex flex-wrap gap-3">
+                    {fm3Shortlist.map((id) => {
+                      const project = fm3Projects.find((p) => p.id === id);
+                      if (!project) return null;
+                      return (
+                        <div key={id} className="flex items-center gap-2 rounded-full border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2 text-sm">
+                          <span>{project.project_name}</span>
+                          <button onClick={() => toggleFm3Shortlist(id)} className="text-[#5f5a52] hover:text-[#171717]">×</button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-wrap gap-3 rounded-[24px] border border-[#e7e0d0] bg-white p-4 shadow-sm">
+                <input
+                  value={fm3Search}
+                  onChange={(event) => setFm3Search(event.target.value)}
+                  placeholder="Search projects, developers or areas"
+                  className="min-w-[220px] flex-1 rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2"
+                />
+                <select
+                  value={fm3SegmentFilter}
+                  onChange={(event) => setFm3SegmentFilter(event.target.value as Fm3MarketSegment | "All")}
+                  className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2"
+                >
+                  <option value="All">All segments</option>
+                  <option value="CCR">CCR</option>
+                  <option value="RCR">RCR</option>
+                  <option value="OCR">OCR</option>
+                </select>
+                <select
+                  value={fm3ZoneFilter}
+                  onChange={(event) => setFm3ZoneFilter(event.target.value as Fm3Zone | "All")}
+                  className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2"
+                >
+                  <option value="All">All zones</option>
+                  <option value="Central">Central</option>
+                  <option value="East">East</option>
+                  <option value="West">West</option>
+                  <option value="North">North</option>
+                  <option value="North-East">North-East</option>
+                </select>
+                <button
+                  onClick={() => { void loadFm3Projects(); }}
+                  className="rounded-2xl border border-[#e7e0d0] px-4 py-2 text-sm"
+                >
+                  Refresh
+                </button>
+              </div>
+
+              {fm3Loading ? (
+                <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-8 text-center text-[#5f5a52]">
+                  Loading projects…
+                </div>
+              ) : fm3Error ? (
+                <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-8 text-center">
+                  <p className="font-semibold text-[#b08c2c]">Could not load projects</p>
+                  <p className="mt-2 text-sm text-[#5f5a52]">{fm3Error}</p>
+                </div>
+              ) : (
+                <div className="grid gap-6 xl:grid-cols-[1fr_1.2fr]">
+                  <div className="space-y-3">
+                    {filteredFm3Projects.length === 0 ? (
+                      <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-8 text-center text-[#5f5a52]">
+                        {fm3Projects.length === 0
+                          ? "No projects found. Add projects via the data foundation."
+                          : "No projects match your filters. Try adjusting your search."}
+                      </div>
+                    ) : (
+                      filteredFm3Projects.map((project) => {
+                        const isSelected = fm3SelectedProjectId === project.id;
+                        const isShortlisted = fm3Shortlist.includes(project.id);
+                        return (
+                          <div
+                            key={project.id}
+                            className={`cursor-pointer rounded-[24px] border p-4 shadow-sm transition ${isSelected ? "border-[#b08c2c] bg-white" : "border-[#e7e0d0] bg-white hover:bg-[#fcfaef]"}`}
+                            onClick={() => { void selectFm3Project(project); }}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <p className="font-semibold">{project.project_name}</p>
+                                {project.developer_name ? <p className="text-sm text-[#5f5a52]">{project.developer_name}</p> : null}
+                              </div>
+                              <button
+                                onClick={(event) => { event.stopPropagation(); toggleFm3Shortlist(project.id); }}
+                                className={`shrink-0 rounded-full border px-3 py-1 text-xs font-semibold transition ${isShortlisted ? "border-[#b08c2c] bg-[#b08c2c] text-white" : fm3Shortlist.length >= 3 ? "cursor-not-allowed border-[#e7e0d0] text-[#c0bab0]" : "border-[#e7e0d0] text-[#5f5a52] hover:border-[#b08c2c] hover:text-[#b08c2c]"}`}
+                              >
+                                {isShortlisted ? "Shortlisted" : "+ Shortlist"}
+                              </button>
+                            </div>
+                            <div className="mt-3 flex flex-wrap gap-2 text-xs text-[#5f5a52]">
+                              {project.market_segment ? <span className="rounded-full border border-[#e7e0d0] px-2 py-1">{project.market_segment}</span> : null}
+                              {project.zone ? <span className="rounded-full border border-[#e7e0d0] px-2 py-1">{project.zone}</span> : null}
+                              {project.district ? <span className="rounded-full border border-[#e7e0d0] px-2 py-1">D{project.district}</span> : null}
+                              {project.project_status ? <span className="rounded-full border border-[#e7e0d0] px-2 py-1">{project.project_status}</span> : null}
+                              {project.total_units ? <span className="rounded-full border border-[#e7e0d0] px-2 py-1">{project.total_units} units</span> : null}
+                            </div>
+                            {project.nearest_mrt_name ? (
+                              <p className="mt-2 text-xs text-[#5f5a52]">MRT: {project.nearest_mrt_name}{project.nearest_mrt_distance_m ? ` (${project.nearest_mrt_distance_m}m)` : ""}</p>
+                            ) : null}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  <div className="space-y-4">
+                    {fm3SelectedProjectId ? (
+                      <>
+                        <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-5 shadow-sm">
+                          <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Unit types</p>
+                          {fm3UnitTypes.length === 0 ? (
+                            <p className="mt-3 text-sm text-[#5f5a52]">No unit type data available.</p>
+                          ) : (
+                            <div className="mt-4 space-y-2">
+                              {fm3UnitTypes.map((ut) => (
+                                <div key={ut.id} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-3">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className="font-semibold">{ut.unit_type_name ?? ut.unit_type_code}</p>
+                                    <span className={`rounded-full border px-2 py-1 text-xs ${ut.availability_status === "available" ? "border-green-200 bg-green-50 text-green-700" : "border-[#e7e0d0] text-[#5f5a52]"}`}>
+                                      {ut.availability_status}
+                                    </span>
+                                  </div>
+                                  <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-[#5f5a52]">
+                                    <span>{ut.bedroom_count} BR{ut.bathroom_count ? ` · ${ut.bathroom_count} BA` : ""}</span>
+                                    {ut.size_sqft_min !== null ? <span>{ut.size_sqft_min.toLocaleString()}–{(ut.size_sqft_max ?? ut.size_sqft_min).toLocaleString()} sqft</span> : null}
+                                    {ut.price_from !== null ? <span>From {ut.currency} {ut.price_from.toLocaleString()}</span> : null}
+                                    {ut.indicative_psf_from !== null ? <span>PSF from {ut.currency} {ut.indicative_psf_from.toLocaleString()}</span> : null}
+                                    {ut.available_units !== null ? <span>{ut.available_units} available</span> : null}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-5 shadow-sm">
+                          <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Recent transactions</p>
+                          {fm3Transactions.length === 0 ? (
+                            <p className="mt-3 text-sm text-[#5f5a52]">No transaction data available.</p>
+                          ) : (
+                            <div className="mt-4 space-y-2">
+                              {fm3Transactions.slice(0, 5).map((tx) => (
+                                <div key={tx.id} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-3 text-sm">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="font-semibold">SGD {tx.transacted_price.toLocaleString()}</span>
+                                    <span className="text-xs text-[#5f5a52]">{tx.sale_date}</span>
+                                  </div>
+                                  <div className="mt-1 flex flex-wrap gap-2 text-xs text-[#5f5a52]">
+                                    <span>{tx.sale_type.replace("_", " ")}</span>
+                                    {tx.floor_range ? <span>Floor {tx.floor_range}</span> : null}
+                                    {tx.area_sqft !== null ? <span>{tx.area_sqft.toLocaleString()} sqft</span> : null}
+                                    {tx.price_psf !== null ? <span>SGD {tx.price_psf.toLocaleString()} psf</span> : null}
+                                  </div>
+                                </div>
+                              ))}
+                              {fm3Transactions.length > 5 && (
+                                <p className="text-xs text-[#5f5a52]">+{fm3Transactions.length - 5} more transactions</p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {fm3Metrics.length > 0 && (
+                          <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-5 shadow-sm">
+                            <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Key metrics</p>
+                            <div className="mt-4 grid gap-3 md:grid-cols-2">
+                              {fm3Metrics.slice(0, 6).map((metric) => (
+                                <div key={metric.id} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-3">
+                                  <p className="text-xs text-[#5f5a52]">{metric.metric_key.replace(/_/g, " ")}</p>
+                                  <p className="mt-1 text-sm font-semibold">
+                                    {metric.metric_value_numeric !== null
+                                      ? `${metric.metric_value_numeric.toLocaleString()}${metric.measurement_unit ? ` ${metric.measurement_unit}` : ""}`
+                                      : metric.metric_value_text ?? (metric.metric_value_boolean !== null ? String(metric.metric_value_boolean) : "—")}
+                                  </p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-8 text-center text-[#5f5a52]">
+                        Select a project from the list to see unit types, transactions, and metrics.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
