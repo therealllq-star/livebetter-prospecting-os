@@ -23,7 +23,7 @@ export async function listFm3Projects(client: SupabaseClient): Promise<Fm3Projec
 export async function getFm3ProjectById(client: SupabaseClient, projectId: string): Promise<Fm3Project | null> {
   const { data, error } = await client.from("fm3_projects").select("*").eq("id", projectId).maybeSingle();
   if (error) throw error;
-  return (data as Fm3Project | null) ?? null;
+  return data as Fm3Project | null;
 }
 
 export async function createFm3Project(client: SupabaseClient, payload: Fm3ProjectInsert): Promise<Fm3Project> {
@@ -71,7 +71,7 @@ export async function upsertFm3ProjectMetrics(client: SupabaseClient, metrics: F
     .select("*");
 
   if (error) throw error;
-  return (data ?? []) as Fm3ProjectMetric[];
+  return data as Fm3ProjectMetric[];
 }
 
 export async function listFm3ProjectMetricsByProject(client: SupabaseClient, projectId: string): Promise<Fm3ProjectMetric[]> {
