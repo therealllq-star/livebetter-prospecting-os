@@ -76,6 +76,15 @@ type ConnectedNextStepDraft = {
   nextFollowUp: string;
   note: string;
   clientSide: LeadClientSide | "";
+  queueMode: boolean;
+};
+
+type AppointmentDraft = {
+  leadId: string;
+  date: string;
+  time: string;
+  note: string;
+  queueMode: boolean;
 };
 
 type PushEnableState = "idle" | "enabling" | "enabled" | "denied" | "unsupported" | "error";
@@ -131,6 +140,14 @@ export default function Home() {
   const [showConnectedNextStepModal, setShowConnectedNextStepModal] = useState(false);
   const [connectedNextStepDraft, setConnectedNextStepDraft] = useState<ConnectedNextStepDraft | null>(null);
   const [isMasterLeadDrawerOpen, setIsMasterLeadDrawerOpen] = useState(false);
+  const [showAppointmentModal, setShowAppointmentModal] = useState(false);
+  const [appointmentDraft, setAppointmentDraft] = useState<AppointmentDraft | null>(null);
+  const [completedQueueLeadIds, setCompletedQueueLeadIds] = useState<string[]>([]);
+  const [isQueueAiLoading, setIsQueueAiLoading] = useState(false);
+  const [queueAiError, setQueueAiError] = useState<string | null>(null);
+  const [queueAiQuestion, setQueueAiQuestion] = useState("");
+  const [queueAiResponse, setQueueAiResponse] = useState("");
+  const [queueAiMessageDraft, setQueueAiMessageDraft] = useState("");
   const [supabaseReadState, setSupabaseReadState] = useState<{
     status: "idle" | "loading" | "connected" | "error";
     authenticated: boolean;
@@ -517,6 +534,13 @@ export default function Home() {
     setIsAiLeoLoading(false);
   }, [selectedLeadId]);
 
+  useEffect(() => {
+    setQueueAiError(null);
+    setQueueAiQuestion("");
+    setQueueAiResponse("");
+    setQueueAiMessageDraft("");
+  }, [currentQueueLeadId]);
+
   const formatDateOnly = (date: Date) => {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -592,6 +616,7 @@ export default function Home() {
   const isOverdueLead = (lead: Lead) => Boolean(lead.nextFollowUp && isOverdue(lead.nextFollowUp));
   const isDueTodayLead = (lead: Lead) => Boolean(lead.nextFollowUp && isDueToday(lead.nextFollowUp));
   const isUnscheduledActiveLead = (lead: Lead) => lead.stage !== "Closed" && lead.stage !== "Lost / KIV" && lead.stage !== "New Lead" && !lead.nextFollowUp;
+  const isCompletedQueueLead = (leadId: string) => completedQueueLeadIds.includes(leadId);
 
   const filteredLeads = useMemo(() => {
     return leads.filter((lead) => {
@@ -606,10 +631,22 @@ export default function Home() {
     });
   }, [leads, gradeFilter, search, sourceFilter, stageFilter]);
 
-  const newLeadQueueLeads = useMemo(() => [...leads].filter((lead) => lead.stage === "New Lead").sort(compareNewestLeadFirst), [leads]);
-  const overdueQueueLeads = useMemo(() => [...leads].filter((lead) => lead.stage !== "New Lead" && isOverdueLead(lead)).sort(compareLeadPriority), [leads]);
-  const dueTodayQueueLeads = useMemo(() => [...leads].filter((lead) => lead.stage !== "New Lead" && isDueTodayLead(lead)).sort(compareLeadPriority), [leads]);
-  const unscheduledBacklogLeads = useMemo(() => [...leads].filter(isUnscheduledActiveLead).sort(compareLeadPriority), [leads]);
+  const newLeadQueueLeads = useMemo(
+    () => [...leads].filter((lead) => lead.stage === "New Lead" && !isCompletedQueueLead(lead.id)).sort(compareNewestLeadFirst),
+    [completedQueueLeadIds, leads]
+  );
+  const overdueQueueLeads = useMemo(
+    () => [...leads].filter((lead) => lead.stage !== "New Lead" && isOverdueLead(lead) && !isCompletedQueueLead(lead.id)).sort(compareLeadPriority),
+    [completedQueueLeadIds, leads]
+  );
+  const dueTodayQueueLeads = useMemo(
+    () => [...leads].filter((lead) => lead.stage !== "New Lead" && isDueTodayLead(lead) && !isCompletedQueueLead(lead.id)).sort(compareLeadPriority),
+    [completedQueueLeadIds, leads]
+  );
+  const unscheduledBacklogLeads = useMemo(
+    () => [...leads].filter((lead) => isUnscheduledActiveLead(lead) && !isCompletedQueueLead(lead.id)).sort(compareLeadPriority),
+    [completedQueueLeadIds, leads]
+  );
   const queueLeads = useMemo(
     () => [...newLeadQueueLeads, ...overdueQueueLeads, ...dueTodayQueueLeads, ...unscheduledBacklogLeads],
     [newLeadQueueLeads, overdueQueueLeads, dueTodayQueueLeads, unscheduledBacklogLeads]
@@ -690,6 +727,26 @@ export default function Home() {
     };
   };
 
+  const requestAiLeoForLead = async (lead: Lead, prompt: string) => {
+    const response = await fetch("/api/ai-leo", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prompt,
+        leadContext: buildAiLeoLeadContext(lead),
+      }),
+    });
+
+    const payload = (await response.json().catch(() => null)) as { response?: string; error?: string } | null;
+    if (!response.ok) {
+      throw new Error(payload?.error || "AI Leo could not complete this request.");
+    }
+
+    return payload?.response || "AI Leo returned an empty response.";
+  };
+
   const askAiLeo = async (prompt: string) => {
     if (!selectedLead) return;
 
@@ -697,23 +754,8 @@ export default function Home() {
     setAiLeoError(null);
 
     try {
-      const response = await fetch("/api/ai-leo", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          prompt,
-          leadContext: buildAiLeoLeadContext(selectedLead),
-        }),
-      });
-
-      const payload = (await response.json().catch(() => null)) as { response?: string; error?: string } | null;
-      if (!response.ok) {
-        throw new Error(payload?.error || "AI Leo could not complete this request.");
-      }
-
-      setAiLeoResponse(payload?.response || "AI Leo returned an empty response.");
+      const result = await requestAiLeoForLead(selectedLead, prompt);
+      setAiLeoResponse(result);
     } catch (error) {
       setAiLeoResponse("");
       setAiLeoError(
@@ -730,6 +772,25 @@ export default function Home() {
     const prompt = aiLeoPrompt.trim();
     if (!prompt) return;
     await askAiLeo(prompt);
+  };
+
+  const runQueueAi = async (prompt: string, options?: { asMessageDraft?: boolean }) => {
+    if (!currentQueueLead) return;
+    setIsQueueAiLoading(true);
+    setQueueAiError(null);
+
+    try {
+      const result = await requestAiLeoForLead(currentQueueLead, prompt);
+      if (options?.asMessageDraft) {
+        setQueueAiMessageDraft(result);
+      } else {
+        setQueueAiResponse(result);
+      }
+    } catch (error) {
+      setQueueAiError(error instanceof Error ? error.message : "AI Leo could not complete this request.");
+    } finally {
+      setIsQueueAiLoading(false);
+    }
   };
 
   const addNoteToLead = async (lead: Lead, details: string) => {
@@ -832,15 +893,68 @@ export default function Home() {
     }
   };
 
-  const openConnectedNextStepPrompt = (lead: Lead) => {
+  const completeQueueLeadAndAdvance = (leadId: string) => {
+    setCompletedQueueLeadIds((prev) => (prev.includes(leadId) ? prev : [...prev, leadId]));
+    const nextLead = queueLeads.find((candidate) => candidate.id !== leadId);
+    setCurrentQueueLeadId(nextLead?.id ?? null);
+  };
+
+  const openConnectedNextStepPrompt = (lead: Lead, options?: { queueMode?: boolean }) => {
     setConnectedNextStepDraft({
       leadId: lead.id,
       stage: "Conversation",
       nextFollowUp: lead.nextFollowUp?.slice(0, 10) ?? "",
       note: "",
       clientSide: lead.clientSide ?? "",
+      queueMode: Boolean(options?.queueMode),
     });
     setShowConnectedNextStepModal(true);
+  };
+
+  const openUnifiedAppointmentFlow = (lead: Lead, options?: { queueMode?: boolean; note?: string; date?: string }) => {
+    setAppointmentDraft({
+      leadId: lead.id,
+      date: options?.date ?? (lead.nextFollowUp?.slice(0, 10) ?? ""),
+      time: "",
+      note: options?.note ?? "",
+      queueMode: Boolean(options?.queueMode),
+    });
+    setShowAppointmentModal(true);
+  };
+
+  const saveUnifiedAppointmentFlow = async () => {
+    if (!appointmentDraft) return;
+    if (!appointmentDraft.date) {
+      alert("Please choose an appointment date.");
+      return;
+    }
+
+    const lead = leads.find((item) => item.id === appointmentDraft.leadId);
+    if (!lead) {
+      setShowAppointmentModal(false);
+      setAppointmentDraft(null);
+      return;
+    }
+
+    const normalizedTime = appointmentDraft.time.trim();
+    if (normalizedTime && !/^\d{2}:\d{2}$/.test(normalizedTime)) {
+      alert("Invalid time. Please use HH:MM.");
+      return;
+    }
+
+    const appointmentDate = normalizedTime ? `${appointmentDraft.date}T${normalizedTime}:00` : appointmentDraft.date;
+
+    try {
+      await markLeadAppointment(lead, appointmentDate, appointmentDraft.note.trim());
+      const shouldAdvance = appointmentDraft.queueMode;
+      setShowAppointmentModal(false);
+      setAppointmentDraft(null);
+      if (shouldAdvance) {
+        completeQueueLeadAndAdvance(lead.id);
+      }
+    } catch {
+      // markLeadAppointment already handles user-facing error details.
+    }
   };
 
   const saveConnectedNextStep = async () => {
@@ -870,6 +984,16 @@ export default function Home() {
       updates.clientSide = connectedNextStepDraft.clientSide;
     }
 
+    if (connectedNextStepDraft.stage === "Appointment Set") {
+      setShowConnectedNextStepModal(false);
+      openUnifiedAppointmentFlow(lead, {
+        queueMode: connectedNextStepDraft.queueMode,
+        note: connectedNextStepDraft.note,
+        date: connectedNextStepDraft.nextFollowUp,
+      });
+      return;
+    }
+
     const note = connectedNextStepDraft.note.trim();
     const detailParts = [`Connected next step saved. Stage: ${connectedNextStepDraft.stage}.`];
     if (connectedNextStepDraft.nextFollowUp) {
@@ -895,6 +1019,9 @@ export default function Home() {
       );
       setShowConnectedNextStepModal(false);
       setConnectedNextStepDraft(null);
+      if (connectedNextStepDraft.queueMode) {
+        completeQueueLeadAndAdvance(lead.id);
+      }
     } catch (error) {
       alert(
         error instanceof Error
@@ -1201,7 +1328,7 @@ export default function Home() {
     }
   };
 
-  const handleLeadAction = async (leadId: string, action: string) => {
+  const handleLeadAction = async (leadId: string, action: string, options?: { queueMode?: boolean }) => {
     const lead = leads.find((item) => item.id === leadId);
     if (!lead) return;
 
@@ -1238,7 +1365,7 @@ export default function Home() {
           { type: "status", title: "Connected", details: `Connected with ${lead.name}`, outcome: "connected" }
         );
         if (persistedLead) {
-          openConnectedNextStepPrompt(persistedLead);
+          openConnectedNextStepPrompt(persistedLead, { queueMode: options?.queueMode });
         }
       } else if (action === "NO ANSWER") {
         persistedLead = await persistLeadMutation(
@@ -1257,10 +1384,8 @@ export default function Home() {
           { type: "follow-up", title: "Follow-up scheduled", details: followUpDetails, outcome: "follow-up" }
         );
       } else if (action === "APPOINTMENT SET") {
-        const appointmentDate = chooseAppointmentDate();
-        if (!appointmentDate) return;
-
-        persistedLead = await markLeadAppointment(lead, appointmentDate);
+        openUnifiedAppointmentFlow(lead, { queueMode: options?.queueMode });
+        return;
       } else if (action === "NOT INTERESTED") {
         persistedLead = await persistLeadMutation(
           leadId,
@@ -1276,11 +1401,21 @@ export default function Home() {
       }
 
       if (persistedLead) {
-        shouldAdvanceQueue = !isQueueEligibleLead(persistedLead);
+        if (options?.queueMode) {
+          if (action === "NO ANSWER" || action === "NOT INTERESTED" || action === "INVALID NUMBER") {
+            shouldAdvanceQueue = true;
+          }
+        } else {
+          shouldAdvanceQueue = !isQueueEligibleLead(persistedLead);
+        }
       }
 
       if (shouldAdvanceQueue && currentQueueLeadId === leadId) {
-        setCurrentQueueLeadId(nextQueueLeadId);
+        if (options?.queueMode) {
+          completeQueueLeadAndAdvance(leadId);
+        } else {
+          setCurrentQueueLeadId(nextQueueLeadId);
+        }
       }
     } catch (error) {
       alert(
@@ -1596,7 +1731,7 @@ export default function Home() {
                     <h3 className="mt-2 text-xl font-semibold">One lead at a time, with the next best action surfaced.</h3>
                   </div>
                     <div className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-4 py-3 text-sm text-[#5f5a52]">
-                      {overdueQueueLeads.length} overdue · {dueTodayQueueLeads.length} due today · {unscheduledBacklogLeads.length} unscheduled
+                      {newLeadQueueLeads.length} new · {overdueQueueLeads.length} overdue · {dueTodayQueueLeads.length} due today · {unscheduledBacklogLeads.length} unscheduled
                       <div className="mt-1 text-xs">Showing next {todayCalls.length} to work</div>
                     </div>
                 </div>
@@ -1621,13 +1756,117 @@ export default function Home() {
 
                       <div className="mt-5 space-y-4">
                         <div>
-                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#5f5a52]">Quick Actions</p>
+                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#5f5a52]">AI Leo</p>
                           <div className="mt-3 flex flex-wrap gap-2">
-                            <button onClick={() => { void addNoteToLead(currentQueueLead, queueNoteInput).then(() => setQueueNoteInput("")); }} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">Add Note</button>
-                            <button onClick={() => { const selectedDate = chooseFollowUpDate(); if (!selectedDate) return; void scheduleFollowUpForLead(currentQueueLead, selectedDate); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Follow Up</button>
-                            <button onClick={() => { const appointmentDate = chooseAppointmentDate(); if (!appointmentDate) return; const appointmentNote = window.prompt("Optional appointment note", "") ?? ""; void markLeadAppointment(currentQueueLead, appointmentDate, appointmentNote); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Appointment</button>
+                            <button
+                              onClick={() => {
+                                void runQueueAi("I may be calling this lead now. Read the full CRM history first and give me a practical 30-second pre-call brief with one objective, key discovery points, and one natural opening line.");
+                              }}
+                              className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm"
+                            >
+                              Prepare My Call
+                            </button>
+                            <button
+                              onClick={() => {
+                                void runQueueAi("Read the full lead history and draft one natural WhatsApp message I can send now with one clear conversational objective.");
+                              }}
+                              className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm"
+                            >
+                              Draft WhatsApp
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (!queueAiQuestion.trim()) return;
+                                void runQueueAi(queueAiQuestion.trim());
+                              }}
+                              className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white"
+                            >
+                              Ask AI Leo
+                            </button>
                           </div>
+                          <textarea
+                            value={queueAiQuestion}
+                            onChange={(event) => setQueueAiQuestion(event.target.value)}
+                            className="mt-3 min-h-[84px] w-full rounded-2xl border border-[#e7e0d0] bg-white px-3 py-2 text-sm"
+                            placeholder="Ask AI Leo about this lead's context and best next move"
+                          />
+                          {isQueueAiLoading ? <p className="mt-2 text-sm text-[#5f5a52]">AI Leo is thinking...</p> : null}
+                          {queueAiError ? <p className="mt-2 text-sm text-[#b08c2c]">{queueAiError}</p> : null}
+                          {queueAiResponse ? (
+                            <div className="mt-3 whitespace-pre-wrap rounded-2xl border border-[#e7e0d0] bg-white p-3 text-sm text-[#171717]">
+                              {queueAiResponse}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#5f5a52]">Action</p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "CALL"); }} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">Call</button>
+                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "WHATSAPP"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">WhatsApp</button>
+                            <button
+                              onClick={() => {
+                                void runQueueAi("Draft one short context-aware message I can send this lead now via WhatsApp. Keep it natural and specific.", { asMessageDraft: true });
+                              }}
+                              className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm"
+                            >
+                              AI Message
+                            </button>
+                          </div>
+                          {queueAiMessageDraft ? (
+                            <div className="mt-3 rounded-2xl border border-[#e7e0d0] bg-white p-3">
+                              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#5f5a52]">AI message preview</p>
+                              <textarea
+                                value={queueAiMessageDraft}
+                                onChange={(event) => setQueueAiMessageDraft(event.target.value)}
+                                className="mt-2 min-h-[90px] w-full rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2 text-sm"
+                              />
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                <button
+                                  onClick={() => {
+                                    void navigator.clipboard.writeText(queueAiMessageDraft);
+                                  }}
+                                  className="rounded-full border border-[#e7e0d0] bg-white px-3 py-1.5 text-xs font-semibold"
+                                >
+                                  Copy
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    const baseWhatsAppUrl = buildWhatsAppLink(currentQueueLead.phone);
+                                    if (!baseWhatsAppUrl) return;
+                                    const url = `${baseWhatsAppUrl}?text=${encodeURIComponent(queueAiMessageDraft)}`;
+                                    window.open(url, "_blank", "noopener,noreferrer");
+                                  }}
+                                  className="rounded-full bg-[#171717] px-3 py-1.5 text-xs font-semibold text-white"
+                                >
+                                  Open in WhatsApp
+                                </button>
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#5f5a52]">Add note</p>
                           <textarea value={queueNoteInput} onChange={(event) => setQueueNoteInput(event.target.value)} className="mt-3 min-h-[96px] w-full rounded-2xl border border-[#e7e0d0] bg-white px-3 py-2 text-sm" placeholder="Add conversation notes or context" />
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <button onClick={() => { void addNoteToLead(currentQueueLead, queueNoteInput).then(() => setQueueNoteInput("")); }} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">Save Note</button>
+                          </div>
+                        </div>
+
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#5f5a52]">Outcome</p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "CONNECTED", { queueMode: true }); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Connected</button>
+                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "APPOINTMENT SET", { queueMode: true }); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Appointment</button>
+                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "NO ANSWER", { queueMode: true }); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">No Answer</button>
+                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "NOT INTERESTED", { queueMode: true }); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Not Interested</button>
+                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "INVALID NUMBER", { queueMode: true }); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Invalid Number</button>
+                          </div>
+                        </div>
+
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#5f5a52]">Manual controls</p>
                           <div className="mt-3 grid gap-3 md:grid-cols-2">
                             <label className="flex flex-col gap-1 text-xs uppercase tracking-[0.2em] text-[#5f5a52]">
                               Grade
@@ -1655,24 +1894,6 @@ export default function Home() {
                                 {!stageOptionsForSelection.includes(currentQueueLead.stage) ? <option value={currentQueueLead.stage}>{currentQueueLead.stage}</option> : null}
                               </select>
                             </label>
-                          </div>
-                        </div>
-
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#5f5a52]">Contact</p>
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "CALL"); }} className="rounded-full bg-[#171717] px-3 py-2 text-sm text-white">Call</button>
-                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "WHATSAPP"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">WhatsApp</button>
-                          </div>
-                        </div>
-
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#5f5a52]">Outcome</p>
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "CONNECTED"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Connected</button>
-                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "NO ANSWER"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">No Answer</button>
-                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "NOT INTERESTED"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Not Interested</button>
-                            <button onClick={() => { void handleLeadAction(currentQueueLead.id, "INVALID NUMBER"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Invalid Number</button>
                           </div>
                         </div>
                       </div>
@@ -2042,6 +2263,9 @@ export default function Home() {
             <div className="mt-6 flex justify-end gap-3">
               <button
                 onClick={() => {
+                  if (connectedNextStepDraft.queueMode) {
+                    completeQueueLeadAndAdvance(connectedNextStepDraft.leadId);
+                  }
                   setShowConnectedNextStepModal(false);
                   setConnectedNextStepDraft(null);
                 }}
@@ -2056,6 +2280,75 @@ export default function Home() {
                 className="rounded-2xl bg-[#171717] px-4 py-2 text-white"
               >
                 Save next step
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showAppointmentModal && appointmentDraft ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-xl rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-xl">
+            <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Appointment outcome</p>
+            <h3 className="mt-2 text-xl font-semibold">Save appointment details</h3>
+            <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <label className="flex flex-col gap-2 text-sm text-[#5f5a52]">
+                Appointment date
+                <input
+                  type="date"
+                  value={appointmentDraft.date}
+                  onChange={(event) => {
+                    setAppointmentDraft((prev) =>
+                      prev ? { ...prev, date: event.target.value } : prev
+                    );
+                  }}
+                  className="rounded-2xl border border-[#e7e0d0] px-3 py-2 text-[#171717]"
+                />
+              </label>
+              <label className="flex flex-col gap-2 text-sm text-[#5f5a52]">
+                Appointment time (optional)
+                <input
+                  type="time"
+                  value={appointmentDraft.time}
+                  onChange={(event) => {
+                    setAppointmentDraft((prev) =>
+                      prev ? { ...prev, time: event.target.value } : prev
+                    );
+                  }}
+                  className="rounded-2xl border border-[#e7e0d0] px-3 py-2 text-[#171717]"
+                />
+              </label>
+              <label className="flex flex-col gap-2 text-sm text-[#5f5a52] md:col-span-2">
+                Optional note
+                <textarea
+                  value={appointmentDraft.note}
+                  onChange={(event) => {
+                    setAppointmentDraft((prev) =>
+                      prev ? { ...prev, note: event.target.value } : prev
+                    );
+                  }}
+                  className="min-h-[96px] rounded-2xl border border-[#e7e0d0] px-3 py-2 text-[#171717]"
+                  placeholder="Appointment context or preparation notes"
+                />
+              </label>
+            </div>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setShowAppointmentModal(false);
+                  setAppointmentDraft(null);
+                }}
+                className="rounded-2xl border border-[#e7e0d0] px-4 py-2"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  void saveUnifiedAppointmentFlow();
+                }}
+                className="rounded-2xl bg-[#171717] px-4 py-2 text-white"
+              >
+                Save appointment
               </button>
             </div>
           </div>
