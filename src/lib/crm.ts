@@ -15,6 +15,7 @@ export type LeadType =
   | "Seller"
   | "New Launch Buyer"
   | "Unknown";
+export type LeadClientSide = "Buyer" | "Seller" | "Buyer + Seller";
 export type LeadStage =
   | "New Lead"
   | "Attempting Contact"
@@ -22,6 +23,7 @@ export type LeadStage =
   | "Conversation"
   | "Follow-Up"
   | "Appointment Set"
+  | "Active Client"
   | "Showflat"
   | "Negotiation"
   | "Closed"
@@ -55,6 +57,7 @@ export interface Lead {
   source: LeadSource;
   campaign: string;
   leadType: LeadType;
+  clientSide?: LeadClientSide | null;
   stage: LeadStage;
   lastContact: string;
   nextFollowUp: string;
@@ -95,18 +98,24 @@ export const gradeAccent: Record<LeadGrade, string> = {
   D: "bg-zinc-100 text-zinc-700 border-zinc-200",
 };
 
-export const stages: LeadStage[] = [
+export const v15Stages: LeadStage[] = [
   "New Lead",
   "Attempting Contact",
   "Connected",
   "Conversation",
   "Follow-Up",
   "Appointment Set",
-  "Showflat",
-  "Negotiation",
+  "Active Client",
   "Closed",
   "Lost / KIV",
 ];
+
+export const legacyStages: LeadStage[] = [
+  "Showflat",
+  "Negotiation",
+];
+
+export const stages: LeadStage[] = [...v15Stages, ...legacyStages];
 
 export const sources: LeadSource[] = [
   "Facebook Ads",
@@ -136,6 +145,7 @@ export const emptyLead = {
   source: "Other" as LeadSource,
   campaign: "",
   leadType: "Unknown" as LeadType,
+  clientSide: null,
   stage: "New Lead" as LeadStage,
   lastContact: "",
   nextFollowUp: "",

@@ -20,13 +20,16 @@ import {
   hasDuplicateLead,
   isDueToday,
   isOverdue,
+  legacyStages,
   scriptDefaults,
   type Lead,
+  type LeadClientSide,
   type LeadGrade,
   type LeadOutcome,
   type LeadSource,
   type LeadStage,
   type ScriptLibrary,
+  v15Stages,
 } from "@/lib/crm";
 import {
   createSupabaseActivity,
@@ -67,6 +70,14 @@ type RealtimeLeadInsertRecord = {
   source?: string | null;
 };
 
+type ConnectedNextStepDraft = {
+  leadId: string;
+  stage: LeadStage;
+  nextFollowUp: string;
+  note: string;
+  clientSide: LeadClientSide | "";
+};
+
 type PushEnableState = "idle" | "enabling" | "enabled" | "denied" | "unsupported" | "error";
 
 function urlBase64ToArrayBuffer(base64String: string): ArrayBuffer {
@@ -87,6 +98,7 @@ export default function Home() {
   const supabaseClient = useMemo(() => createClient(), []);
   const notifiedLeadIdsRef = useRef<Set<string>>(new Set());
   const handledDeepLinkLeadIdRef = useRef<string | null>(null);
+  const leadDetailRef = useRef<HTMLElement | null>(null);
   const [activeView, setActiveView] = useState<View>("Dashboard");
   const [leads, setLeads] = useState<Lead[]>([]);
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null);
@@ -116,6 +128,8 @@ export default function Home() {
   const [pushStatusMessage, setPushStatusMessage] = useState("Not enabled on this device yet.");
   const [deepLinkLeadId, setDeepLinkLeadId] = useState<string | null>(null);
   const [deepLinkView, setDeepLinkView] = useState<string | null>(null);
+  const [showConnectedNextStepModal, setShowConnectedNextStepModal] = useState(false);
+  const [connectedNextStepDraft, setConnectedNextStepDraft] = useState<ConnectedNextStepDraft | null>(null);
   const [supabaseReadState, setSupabaseReadState] = useState<{
     status: "idle" | "loading" | "connected" | "error";
     authenticated: boolean;
@@ -128,6 +142,10 @@ export default function Home() {
     sessionExists: boolean;
     userExists: boolean;
   }>({ status: "idle", authenticated: false, leadCount: 0, rawLeadCount: 0, leads: [], error: null, errorCode: null, errorMessage: null, sessionExists: false, userExists: false });
+
+  const stageOptionsForSelection = useMemo(() => v15Stages, []);
+  const stageOptionsForFilterAndPipeline = useMemo(() => [...v15Stages, ...legacyStages], []);
+  const activeClientSides = useMemo(() => ["Buyer", "Seller", "Buyer + Seller"] as const, []);
 
   useEffect(() => {
     Promise.all([supabaseClient.auth.getSession(), supabaseClient.auth.getUser()]).then(([sessionResult, userResult]) => {
@@ -387,12 +405,21 @@ export default function Home() {
 
     const leadExists = leads.some((lead) => lead.id === notification.leadId);
     if (leadExists) {
-      setSelectedLeadId(notification.leadId);
+      if (selectedLeadId === notification.leadId && leadDetailRef.current) {
+        leadDetailRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+      } else {
+        setSelectedLeadId(notification.leadId);
+      }
       return;
     }
 
     await loadSupabaseLeads({ focusLeadId: notification.leadId });
   };
+
+  useEffect(() => {
+    if (!selectedLeadId || !leadDetailRef.current) return;
+    leadDetailRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [selectedLeadId]);
 
   const toggleNotificationMenu = () => {
     setShowNotificationMenu((prev) => {
@@ -585,11 +612,11 @@ export default function Home() {
   }, [currentQueueLeadId, queueLeads]);
 
   const pipelineByStage = useMemo(() => {
-    return (["New Lead", "Attempting Contact", "Connected", "Conversation", "Follow-Up", "Appointment Set", "Showflat", "Negotiation", "Closed", "Lost / KIV"] as LeadStage[]).map((stage) => ({
+    return stageOptionsForFilterAndPipeline.map((stage) => ({
       stage,
       leads: filteredLeads.filter((lead) => lead.stage === stage),
     }));
-  }, [filteredLeads]);
+  }, [filteredLeads, stageOptionsForFilterAndPipeline]);
 
   const summary = useMemo(() => {
     const total = leads.length;
@@ -602,6 +629,10 @@ export default function Home() {
   }, [leads]);
 
   const openLead = (lead: Lead) => {
+    if (selectedLeadId === lead.id && leadDetailRef.current) {
+      leadDetailRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
     setSelectedLeadId(lead.id);
   };
 
@@ -725,6 +756,128 @@ export default function Home() {
     }
   };
 
+  const requestActiveClientSide = (current?: LeadClientSide | null): LeadClientSide | null => {
+    const input = window.prompt("Client Side: Buyer, Seller, or Buyer + Seller", current ?? "Buyer");
+    if (input === null) return null;
+    const normalized = input.trim().toLowerCase();
+    if (normalized === "buyer") return "Buyer";
+    if (normalized === "seller") return "Seller";
+    if (normalized === "buyer + seller" || normalized === "buyer+seller") return "Buyer + Seller";
+    alert("Please enter Buyer, Seller, or Buyer + Seller.");
+    return null;
+  };
+
+  const changeLeadStage = async (lead: Lead, stage: LeadStage, note?: string) => {
+    if (lead.stage === stage && !note) return;
+
+    let nextClientSide = lead.clientSide ?? null;
+    if (stage === "Active Client") {
+      const selectedClientSide = requestActiveClientSide(lead.clientSide);
+      if (!selectedClientSide) return;
+      nextClientSide = selectedClientSide;
+    }
+
+    const updates: Partial<Lead> = {
+      stage,
+      clientSide: stage === "Active Client" ? nextClientSide : lead.clientSide ?? null,
+    };
+
+    if (stage === "Follow-Up" && !lead.nextFollowUp) {
+      updates.nextAction = "Set next follow-up";
+    }
+
+    const detail = note?.trim()
+      ? `Stage updated to ${stage}. ${note.trim()}`
+      : `Stage updated to ${stage}`;
+
+    try {
+      await persistLeadMutation(
+        lead.id,
+        updates,
+        { type: "status", title: "Stage changed", details: detail }
+      );
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Unable to persist this stage change to Supabase."
+      );
+      throw error;
+    }
+  };
+
+  const openConnectedNextStepPrompt = (lead: Lead) => {
+    setConnectedNextStepDraft({
+      leadId: lead.id,
+      stage: "Conversation",
+      nextFollowUp: lead.nextFollowUp?.slice(0, 10) ?? "",
+      note: "",
+      clientSide: lead.clientSide ?? "",
+    });
+    setShowConnectedNextStepModal(true);
+  };
+
+  const saveConnectedNextStep = async () => {
+    if (!connectedNextStepDraft) return;
+
+    const lead = leads.find((item) => item.id === connectedNextStepDraft.leadId);
+    if (!lead) {
+      setShowConnectedNextStepModal(false);
+      setConnectedNextStepDraft(null);
+      return;
+    }
+
+    const updates: Partial<Lead> = {
+      stage: connectedNextStepDraft.stage,
+    };
+
+    if (connectedNextStepDraft.nextFollowUp) {
+      updates.nextFollowUp = connectedNextStepDraft.nextFollowUp;
+      updates.nextAction = `Follow up on ${connectedNextStepDraft.nextFollowUp}`;
+    }
+
+    if (connectedNextStepDraft.stage === "Active Client") {
+      if (!connectedNextStepDraft.clientSide) {
+        alert("Please choose a Client Side before saving Active Client.");
+        return;
+      }
+      updates.clientSide = connectedNextStepDraft.clientSide;
+    }
+
+    const note = connectedNextStepDraft.note.trim();
+    const detailParts = [`Connected next step saved. Stage: ${connectedNextStepDraft.stage}.`];
+    if (connectedNextStepDraft.nextFollowUp) {
+      detailParts.push(`Follow-up: ${connectedNextStepDraft.nextFollowUp}.`);
+    }
+    if (connectedNextStepDraft.stage === "Active Client" && connectedNextStepDraft.clientSide) {
+      detailParts.push(`Client Side: ${connectedNextStepDraft.clientSide}.`);
+    }
+    if (note) {
+      detailParts.push(`Note: ${note}`);
+    }
+
+    try {
+      await persistLeadMutation(
+        lead.id,
+        updates,
+        {
+          type: "follow-up",
+          title: "Connected next step",
+          details: detailParts.join(" "),
+          outcome: "follow-up",
+        }
+      );
+      setShowConnectedNextStepModal(false);
+      setConnectedNextStepDraft(null);
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Unable to save the connected next step."
+      );
+    }
+  };
+
   const markLeadAppointment = async (lead: Lead, appointmentDate: string, note?: string) => {
     try {
       const client = createClient();
@@ -839,6 +992,10 @@ export default function Home() {
 
   const saveDraft = async () => {
     const normalized = { ...draft, phone: draft.phone.trim() };
+    if (normalized.stage === "Active Client" && !normalized.clientSide) {
+      setValidationMessage("Please choose a Client Side for Active Client stage.");
+      return;
+    }
     const duplicate = hasDuplicateLead(leads, { ...normalized, id: normalized.id || `lead-${Date.now()}` } as Lead);
     if (duplicate) {
       setValidationMessage("This number already exists in your CRM. Please review or merge the duplicate before saving.");
@@ -1054,6 +1211,9 @@ export default function Home() {
           { stage: "Connected", nextAction: "Capture notes and set next follow-up" },
           { type: "status", title: "Connected", details: `Connected with ${lead.name}`, outcome: "connected" }
         );
+        if (persistedLead) {
+          openConnectedNextStepPrompt(persistedLead);
+        }
       } else if (action === "NO ANSWER") {
         persistedLead = await persistLeadMutation(
           leadId,
@@ -1356,7 +1516,7 @@ export default function Home() {
                 </select>
                 <select value={stageFilter} onChange={(event) => setStageFilter(event.target.value as LeadStage | "All")} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2">
                   <option value="All">All stages</option>
-                  {['New Lead','Attempting Contact','Connected','Conversation','Follow-Up','Appointment Set','Showflat','Negotiation','Closed','Lost / KIV'].map((stage) => <option key={stage} value={stage}>{stage}</option>)}
+                  {stageOptionsForFilterAndPipeline.map((stage) => <option key={stage} value={stage}>{stage}</option>)}
                 </select>
                 <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as LeadSource | "All")} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2">
                   <option value="All">All sources</option>
@@ -1438,10 +1598,33 @@ export default function Home() {
                             <button onClick={() => { const appointmentDate = chooseAppointmentDate(); if (!appointmentDate) return; const appointmentNote = window.prompt("Optional appointment note", "") ?? ""; void markLeadAppointment(currentQueueLead, appointmentDate, appointmentNote); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Appointment</button>
                           </div>
                           <textarea value={queueNoteInput} onChange={(event) => setQueueNoteInput(event.target.value)} className="mt-3 min-h-[96px] w-full rounded-2xl border border-[#e7e0d0] bg-white px-3 py-2 text-sm" placeholder="Add conversation notes or context" />
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            {(["A", "B", "C", "D"] as LeadGrade[]).map((grade) => (
-                              <button key={grade} onClick={() => { void changeLeadGrade(currentQueueLead, grade); }} className={`rounded-full border px-3 py-2 text-sm ${currentQueueLead.grade === grade ? gradeAccent[grade] : "border-[#e7e0d0] bg-white"}`}>{grade}</button>
-                            ))}
+                          <div className="mt-3 grid gap-3 md:grid-cols-2">
+                            <label className="flex flex-col gap-1 text-xs uppercase tracking-[0.2em] text-[#5f5a52]">
+                              Grade
+                              <select
+                                value={currentQueueLead.grade}
+                                onChange={(event) => { void changeLeadGrade(currentQueueLead, event.target.value as LeadGrade); }}
+                                className="rounded-2xl border border-[#e7e0d0] bg-white px-3 py-2 text-sm normal-case tracking-normal text-[#171717]"
+                              >
+                                <option value="A">A</option>
+                                <option value="B">B</option>
+                                <option value="C">C</option>
+                                <option value="D">D</option>
+                              </select>
+                            </label>
+                            <label className="flex flex-col gap-1 text-xs uppercase tracking-[0.2em] text-[#5f5a52]">
+                              Stage
+                              <select
+                                value={currentQueueLead.stage}
+                                onChange={(event) => { void changeLeadStage(currentQueueLead, event.target.value as LeadStage); }}
+                                className="rounded-2xl border border-[#e7e0d0] bg-white px-3 py-2 text-sm normal-case tracking-normal text-[#171717]"
+                              >
+                                {stageOptionsForSelection.map((stage) => (
+                                  <option key={stage} value={stage}>{stage}</option>
+                                ))}
+                                {!stageOptionsForSelection.includes(currentQueueLead.stage) ? <option value={currentQueueLead.stage}>{currentQueueLead.stage}</option> : null}
+                              </select>
+                            </label>
                           </div>
                         </div>
 
@@ -1551,64 +1734,9 @@ export default function Home() {
           {activeView === "Settings" && (
             <div className="space-y-6">
               <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
-                <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">SUPABASE CONNECTION TEST</p>
-                <h3 className="mt-2 text-xl font-semibold">Read-only verification for the authenticated leads table</h3>
-                <div className="mt-6 grid gap-3 md:grid-cols-3">
-                  <div className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-4">
-                    <p className="text-sm text-[#5f5a52]">Connection</p>
-                    <p className="mt-2 font-semibold">{supabaseReadState.status === "connected" ? "Connected" : supabaseReadState.status === "error" ? "Error" : "Idle"}</p>
-                  </div>
-                  <div className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-4">
-                    <p className="text-sm text-[#5f5a52]">Authenticated</p>
-                    <p className="mt-2 font-semibold">{supabaseReadState.authenticated ? "Yes" : "No"}</p>
-                  </div>
-                  <div className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-4">
-                    <p className="text-sm text-[#5f5a52]">Supabase leads found</p>
-                    <p className="mt-2 font-semibold">{supabaseReadState.leadCount}</p>
-                  </div>
-                </div>
-                <div className="mt-4 grid gap-3 md:grid-cols-3">
-                  <div className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-4">
-                    <p className="text-sm text-[#5f5a52]">Raw rows before mapping</p>
-                    <p className="mt-2 font-semibold">{supabaseReadState.rawLeadCount}</p>
-                  </div>
-                  <div className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-4">
-                    <p className="text-sm text-[#5f5a52]">Session exists</p>
-                    <p className="mt-2 font-semibold">{supabaseReadState.sessionExists ? "Yes" : "No"}</p>
-                  </div>
-                  <div className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-4">
-                    <p className="text-sm text-[#5f5a52]">User exists</p>
-                    <p className="mt-2 font-semibold">{supabaseReadState.userExists ? "Yes" : "No"}</p>
-                  </div>
-                </div>
-                {supabaseReadState.error ? <p className="mt-4 text-sm text-[#b08c2c]">{supabaseReadState.error}</p> : null}
-                {supabaseReadState.errorCode ? <p className="mt-2 text-sm text-[#5f5a52]">Error code: {supabaseReadState.errorCode}</p> : null}
-                {supabaseReadState.errorMessage ? <p className="mt-2 text-sm text-[#5f5a52]">Error message: {supabaseReadState.errorMessage}</p> : null}
-                <div className="mt-6 flex flex-wrap gap-3">
-                  <button onClick={() => { void loadSupabaseLeads(); }} className="rounded-2xl bg-[#171717] px-4 py-2 text-sm font-semibold text-white">VIEW SUPABASE LEADS</button>
-                  <p className="text-sm text-[#5f5a52]">No localStorage data is changed by this test.</p>
-                </div>
-                {supabaseReadState.leads.length ? (
-                  <div className="mt-6 space-y-3">
-                    {supabaseReadState.leads.map((lead) => (
-                      <div key={lead.id} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-4">
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <p className="font-semibold">{lead.name}</p>
-                            <p className="text-sm text-[#5f5a52]">{lead.phone || "No phone on record"}</p>
-                          </div>
-                          <div className={`rounded-full border px-3 py-1 text-xs font-semibold ${gradeAccent[lead.grade]}`}>{gradeLabels[lead.grade]}</div>
-                        </div>
-                        <div className="mt-3 grid gap-2 text-sm text-[#5f5a52] md:grid-cols-2">
-                          <p>Stage: {lead.stage}</p>
-                          <p>Source: {lead.source}</p>
-                          <p>Next action: {lead.nextAction || "—"}</p>
-                          <p>Remarks: {lead.remarks || "—"}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
+                <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Operational settings</p>
+                <h3 className="mt-2 text-xl font-semibold">Manage notifications and data tools</h3>
+                <p className="mt-4 text-sm text-[#5f5a52]">Prospecting OS now loads and syncs leads automatically from Supabase during normal CRM usage.</p>
               </div>
 
               <div className="rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
@@ -1644,7 +1772,7 @@ export default function Home() {
           )}
 
           {selectedLead && (
-            <section className="mt-6 rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
+            <section ref={leadDetailRef} className="mt-6 rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Lead detail</p>
@@ -1671,10 +1799,33 @@ export default function Home() {
                         void markLeadAppointment(selectedLead, appointmentDate, appointmentNote);
                       }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">Mark Appointment</button>
                     </div>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {(["A", "B", "C", "D"] as LeadGrade[]).map((grade) => (
-                        <button key={grade} onClick={() => { void changeLeadGrade(selectedLead, grade); }} className={`rounded-full border px-3 py-2 text-sm ${selectedLead.grade === grade ? gradeAccent[grade] : "border-[#e7e0d0] bg-white"}`}>{grade}</button>
-                      ))}
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      <label className="flex flex-col gap-1 text-xs uppercase tracking-[0.2em] text-[#5f5a52]">
+                        Grade
+                        <select
+                          value={selectedLead.grade}
+                          onChange={(event) => { void changeLeadGrade(selectedLead, event.target.value as LeadGrade); }}
+                          className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2 text-sm normal-case tracking-normal text-[#171717]"
+                        >
+                          <option value="A">A</option>
+                          <option value="B">B</option>
+                          <option value="C">C</option>
+                          <option value="D">D</option>
+                        </select>
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs uppercase tracking-[0.2em] text-[#5f5a52]">
+                        Stage
+                        <select
+                          value={selectedLead.stage}
+                          onChange={(event) => { void changeLeadStage(selectedLead, event.target.value as LeadStage); }}
+                          className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2 text-sm normal-case tracking-normal text-[#171717]"
+                        >
+                          {stageOptionsForSelection.map((stage) => (
+                            <option key={stage} value={stage}>{stage}</option>
+                          ))}
+                          {!stageOptionsForSelection.includes(selectedLead.stage) ? <option value={selectedLead.stage}>{selectedLead.stage}</option> : null}
+                        </select>
+                      </label>
                     </div>
                   </div>
                   <div>
@@ -1686,6 +1837,7 @@ export default function Home() {
                     <p className="mt-2 text-sm">Source: {selectedLead.source}</p>
                     <p className="text-sm">Campaign: {selectedLead.campaign}</p>
                     <p className="text-sm">Lead type: {selectedLead.leadType}</p>
+                    <p className="text-sm">Client side: {selectedLead.clientSide ?? "—"}</p>
                   </div>
                   <div>
                     <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Current stage</p>
@@ -1766,6 +1918,97 @@ export default function Home() {
         </main>
       </div>
 
+      {showConnectedNextStepModal && connectedNextStepDraft ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-xl rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-xl">
+            <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Connected next step</p>
+            <h3 className="mt-2 text-xl font-semibold">Set the deliberate follow-up plan</h3>
+            <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <label className="flex flex-col gap-2 text-sm text-[#5f5a52]">
+                Next stage
+                <select
+                  value={connectedNextStepDraft.stage}
+                  onChange={(event) => {
+                    setConnectedNextStepDraft((prev) =>
+                      prev ? { ...prev, stage: event.target.value as LeadStage } : prev
+                    );
+                  }}
+                  className="rounded-2xl border border-[#e7e0d0] px-3 py-2 text-[#171717]"
+                >
+                  {stageOptionsForSelection.map((stage) => (
+                    <option key={stage} value={stage}>{stage}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-2 text-sm text-[#5f5a52]">
+                Next follow-up date (optional)
+                <input
+                  type="date"
+                  value={connectedNextStepDraft.nextFollowUp}
+                  onChange={(event) => {
+                    setConnectedNextStepDraft((prev) =>
+                      prev ? { ...prev, nextFollowUp: event.target.value } : prev
+                    );
+                  }}
+                  className="rounded-2xl border border-[#e7e0d0] px-3 py-2 text-[#171717]"
+                />
+              </label>
+              {connectedNextStepDraft.stage === "Active Client" ? (
+                <label className="flex flex-col gap-2 text-sm text-[#5f5a52] md:col-span-2">
+                  Client Side
+                  <select
+                    value={connectedNextStepDraft.clientSide}
+                    onChange={(event) => {
+                      setConnectedNextStepDraft((prev) =>
+                        prev ? { ...prev, clientSide: event.target.value as LeadClientSide | "" } : prev
+                      );
+                    }}
+                    className="rounded-2xl border border-[#e7e0d0] px-3 py-2 text-[#171717]"
+                  >
+                    <option value="">Select client side</option>
+                    {activeClientSides.map((side) => (
+                      <option key={side} value={side}>{side}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+              <label className="flex flex-col gap-2 text-sm text-[#5f5a52] md:col-span-2">
+                Optional context note
+                <textarea
+                  value={connectedNextStepDraft.note}
+                  onChange={(event) => {
+                    setConnectedNextStepDraft((prev) =>
+                      prev ? { ...prev, note: event.target.value } : prev
+                    );
+                  }}
+                  className="min-h-[96px] rounded-2xl border border-[#e7e0d0] px-3 py-2 text-[#171717]"
+                  placeholder="What did you learn and what should happen next?"
+                />
+              </label>
+            </div>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setShowConnectedNextStepModal(false);
+                  setConnectedNextStepDraft(null);
+                }}
+                className="rounded-2xl border border-[#e7e0d0] px-4 py-2"
+              >
+                Skip
+              </button>
+              <button
+                onClick={() => {
+                  void saveConnectedNextStep();
+                }}
+                className="rounded-2xl bg-[#171717] px-4 py-2 text-white"
+              >
+                Save next step
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-2xl rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-xl">
@@ -1790,8 +2033,17 @@ export default function Home() {
                 {['HDB Upgrader','First-Time Buyer','Investor','Resale Buyer','Seller','New Launch Buyer','Unknown'].map((type) => <option key={type} value={type}>{type}</option>)}
               </select>
               <select value={draft.stage} onChange={(event) => setDraft((prev) => ({ ...prev, stage: event.target.value as LeadStage }))} className="rounded-2xl border border-[#e7e0d0] px-3 py-2">
-                {['New Lead','Attempting Contact','Connected','Conversation','Follow-Up','Appointment Set','Showflat','Negotiation','Closed','Lost / KIV'].map((stage) => <option key={stage} value={stage}>{stage}</option>)}
+                {stageOptionsForSelection.map((stage) => <option key={stage} value={stage}>{stage}</option>)}
+                {!stageOptionsForSelection.includes(draft.stage) ? <option value={draft.stage}>{draft.stage}</option> : null}
               </select>
+              {draft.stage === "Active Client" ? (
+                <select value={draft.clientSide ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, clientSide: event.target.value ? (event.target.value as LeadClientSide) : null }))} className="rounded-2xl border border-[#e7e0d0] px-3 py-2">
+                  <option value="">Client Side</option>
+                  {activeClientSides.map((side) => <option key={side} value={side}>{side}</option>)}
+                </select>
+              ) : (
+                <input value="" readOnly placeholder="Client Side" className="rounded-2xl border border-[#e7e0d0] px-3 py-2 text-[#b7b0a2]" />
+              )}
               <input type="date" value={draft.nextFollowUp?.slice(0, 10) ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, nextFollowUp: event.target.value }))} className="rounded-2xl border border-[#e7e0d0] px-3 py-2" />
               <input value={draft.nextAction} onChange={(event) => setDraft((prev) => ({ ...prev, nextAction: event.target.value }))} placeholder="Next Action" className="rounded-2xl border border-[#e7e0d0] px-3 py-2" />
               <input value={draft.remarks} onChange={(event) => setDraft((prev) => ({ ...prev, remarks: event.target.value }))} placeholder="Remarks" className="rounded-2xl border border-[#e7e0d0] px-3 py-2" />

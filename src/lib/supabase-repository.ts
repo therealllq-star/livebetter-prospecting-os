@@ -1,5 +1,5 @@
 import { createClient } from "@/utils/supabase/client";
-import { type Lead, type LeadGrade, type LeadStage, type ActivityEntry } from "@/lib/crm";
+import { type Lead, type LeadClientSide, type LeadGrade, type LeadStage, type ActivityEntry } from "@/lib/crm";
 
 type SupabaseClient = ReturnType<typeof createClient>;
 
@@ -28,6 +28,7 @@ type SupabaseLeadRecord = {
   estimated_property_value?: number | null;
   outstanding_loan?: number | null;
   ownership_structure?: string | null;
+  client_side?: string | null;
   mop_ssd_status?: string | null;
   buying_objective?: string | null;
   budget_min?: number | null;
@@ -105,6 +106,7 @@ const stageStatusMap: Record<LeadStage, string> = {
   Conversation: "conversation",
   "Follow-Up": "follow_up",
   "Appointment Set": "appointment_set",
+  "Active Client": "active_client",
   Showflat: "showflat",
   Negotiation: "negotiation",
   Closed: "closed",
@@ -118,11 +120,37 @@ const statusStageMap: Record<string, LeadStage> = {
   conversation: "Conversation",
   follow_up: "Follow-Up",
   appointment_set: "Appointment Set",
+  active_client: "Active Client",
   showflat: "Showflat",
   negotiation: "Negotiation",
   closed: "Closed",
   kiv: "Lost / KIV",
 };
+
+function mapOwnershipStructureToClientSide(value?: string | null): LeadClientSide | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "buyer") return "Buyer";
+  if (normalized === "seller") return "Seller";
+  if (normalized === "buyer + seller" || normalized === "buyer+seller") return "Buyer + Seller";
+  return null;
+}
+
+function mapSupabaseClientSideToLead(value?: string | null): LeadClientSide | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "buyer") return "Buyer";
+  if (normalized === "seller") return "Seller";
+  if (normalized === "buyer_seller" || normalized === "buyer+seller" || normalized === "buyer + seller") return "Buyer + Seller";
+  return null;
+}
+
+function mapLeadClientSideToSupabase(value?: LeadClientSide | null): "buyer" | "seller" | "buyer_seller" | null {
+  if (!value) return null;
+  if (value === "Buyer") return "buyer";
+  if (value === "Seller") return "seller";
+  return "buyer_seller";
+}
 
 const gradeTemperatureMap: Record<LeadGrade, string> = {
   A: "HOT",
@@ -152,6 +180,7 @@ export function mapLeadToSupabaseLead(lead: Lead): SupabaseLeadRecord {
     action_priority: lead.nextAction || null,
     source: lead.source || null,
     campaign: lead.campaign || null,
+    client_side: mapLeadClientSideToSupabase(lead.clientSide),
     last_contact_at: lead.lastContact || null,
     next_action_type: lead.nextAction || null,
     next_action_at: lead.nextFollowUp || null,
@@ -180,6 +209,7 @@ export function mapSupabaseLeadToLead(record: SupabaseLeadRecord, activities: Ac
     source: (record.source as Lead["source"]) ?? "Other",
     campaign: record.campaign ?? "",
     leadType: "Unknown",
+    clientSide: mapSupabaseClientSideToLead(record.client_side) ?? mapOwnershipStructureToClientSide(record.ownership_structure),
     stage,
     lastContact: record.last_contact_at ?? "",
     nextFollowUp: record.next_action_at ?? "",
