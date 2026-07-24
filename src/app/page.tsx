@@ -130,6 +130,7 @@ export default function Home() {
   const [deepLinkView, setDeepLinkView] = useState<string | null>(null);
   const [showConnectedNextStepModal, setShowConnectedNextStepModal] = useState(false);
   const [connectedNextStepDraft, setConnectedNextStepDraft] = useState<ConnectedNextStepDraft | null>(null);
+  const [isMasterLeadDrawerOpen, setIsMasterLeadDrawerOpen] = useState(false);
   const [supabaseReadState, setSupabaseReadState] = useState<{
     status: "idle" | "loading" | "connected" | "error";
     authenticated: boolean;
@@ -324,10 +325,17 @@ export default function Home() {
 
     if (deepLinkView === "Master CRM") {
       setActiveView("Master CRM");
+      setIsMasterLeadDrawerOpen(true);
     }
     setSelectedLeadId(deepLinkLeadId);
     handledDeepLinkLeadIdRef.current = deepLinkLeadId;
   }, [authChecked, deepLinkLeadId, deepLinkView, isAuthenticated, leads]);
+
+  useEffect(() => {
+    if (activeView !== "Master CRM") {
+      setIsMasterLeadDrawerOpen(false);
+    }
+  }, [activeView]);
 
   useEffect(() => {
     if (!authChecked || !isAuthenticated) {
@@ -384,6 +392,9 @@ export default function Home() {
   const isSupabaseLoading = authChecked && isAuthenticated && (supabaseReadState.status === "idle" || supabaseReadState.status === "loading");
   const hasSupabaseError = authChecked && isAuthenticated && supabaseReadState.status === "error";
   const hasNoSupabaseLeads = authChecked && isAuthenticated && supabaseReadState.status === "connected" && leads.length === 0;
+  const isMasterCRMView = activeView === "Master CRM";
+  const showLeadDetailDrawer = isMasterCRMView && Boolean(selectedLead) && isMasterLeadDrawerOpen;
+  const showInlineLeadDetail = Boolean(selectedLead) && !isMasterCRMView;
 
   const markNotificationRead = (notificationId: string) => {
     setInboundNotifications((prev) =>
@@ -405,6 +416,7 @@ export default function Home() {
 
     const leadExists = leads.some((lead) => lead.id === notification.leadId);
     if (leadExists) {
+      setIsMasterLeadDrawerOpen(true);
       if (selectedLeadId === notification.leadId && leadDetailRef.current) {
         leadDetailRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
       } else {
@@ -417,9 +429,9 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (!selectedLeadId || !leadDetailRef.current) return;
+    if (!selectedLeadId || !leadDetailRef.current || activeView === "Master CRM") return;
     leadDetailRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [selectedLeadId]);
+  }, [activeView, selectedLeadId]);
 
   const toggleNotificationMenu = () => {
     setShowNotificationMenu((prev) => {
@@ -566,13 +578,20 @@ export default function Home() {
 
   const isQueueEligibleLead = (lead: Lead) => {
     if (lead.stage === "Closed" || lead.stage === "Lost / KIV") return false;
+    if (lead.stage === "New Lead") return true;
     if (!lead.nextFollowUp) return true;
     return isDueToday(lead.nextFollowUp) || isOverdue(lead.nextFollowUp);
   };
 
+  const compareNewestLeadFirst = (left: Lead, right: Lead) => {
+    const leftTime = left.createdDate ? new Date(left.createdDate).getTime() : 0;
+    const rightTime = right.createdDate ? new Date(right.createdDate).getTime() : 0;
+    return rightTime - leftTime;
+  };
+
   const isOverdueLead = (lead: Lead) => Boolean(lead.nextFollowUp && isOverdue(lead.nextFollowUp));
   const isDueTodayLead = (lead: Lead) => Boolean(lead.nextFollowUp && isDueToday(lead.nextFollowUp));
-  const isUnscheduledActiveLead = (lead: Lead) => lead.stage !== "Closed" && lead.stage !== "Lost / KIV" && !lead.nextFollowUp;
+  const isUnscheduledActiveLead = (lead: Lead) => lead.stage !== "Closed" && lead.stage !== "Lost / KIV" && lead.stage !== "New Lead" && !lead.nextFollowUp;
 
   const filteredLeads = useMemo(() => {
     return leads.filter((lead) => {
@@ -587,12 +606,13 @@ export default function Home() {
     });
   }, [leads, gradeFilter, search, sourceFilter, stageFilter]);
 
-  const overdueQueueLeads = useMemo(() => [...leads].filter(isOverdueLead).sort(compareLeadPriority), [leads]);
-  const dueTodayQueueLeads = useMemo(() => [...leads].filter(isDueTodayLead).sort(compareLeadPriority), [leads]);
+  const newLeadQueueLeads = useMemo(() => [...leads].filter((lead) => lead.stage === "New Lead").sort(compareNewestLeadFirst), [leads]);
+  const overdueQueueLeads = useMemo(() => [...leads].filter((lead) => lead.stage !== "New Lead" && isOverdueLead(lead)).sort(compareLeadPriority), [leads]);
+  const dueTodayQueueLeads = useMemo(() => [...leads].filter((lead) => lead.stage !== "New Lead" && isDueTodayLead(lead)).sort(compareLeadPriority), [leads]);
   const unscheduledBacklogLeads = useMemo(() => [...leads].filter(isUnscheduledActiveLead).sort(compareLeadPriority), [leads]);
   const queueLeads = useMemo(
-    () => [...overdueQueueLeads, ...dueTodayQueueLeads, ...unscheduledBacklogLeads],
-    [overdueQueueLeads, dueTodayQueueLeads, unscheduledBacklogLeads]
+    () => [...newLeadQueueLeads, ...overdueQueueLeads, ...dueTodayQueueLeads, ...unscheduledBacklogLeads],
+    [newLeadQueueLeads, overdueQueueLeads, dueTodayQueueLeads, unscheduledBacklogLeads]
   );
   const sortedPriorityLeads = useMemo(() => queueLeads.slice(0, 5), [queueLeads]);
   const todayCalls = useMemo(() => queueLeads.slice(0, 6), [queueLeads]);
@@ -629,6 +649,12 @@ export default function Home() {
   }, [leads]);
 
   const openLead = (lead: Lead) => {
+    if (activeView === "Master CRM") {
+      setSelectedLeadId(lead.id);
+      setIsMasterLeadDrawerOpen(true);
+      return;
+    }
+
     if (selectedLeadId === lead.id && leadDetailRef.current) {
       leadDetailRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
       return;
@@ -1516,7 +1542,7 @@ export default function Home() {
                 </select>
                 <select value={stageFilter} onChange={(event) => setStageFilter(event.target.value as LeadStage | "All")} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2">
                   <option value="All">All stages</option>
-                  {stageOptionsForFilterAndPipeline.map((stage) => <option key={stage} value={stage}>{stage}</option>)}
+                  {stageOptionsForSelection.map((stage) => <option key={stage} value={stage}>{stage}</option>)}
                 </select>
                 <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as LeadSource | "All")} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2">
                   <option value="All">All sources</option>
@@ -1541,15 +1567,19 @@ export default function Home() {
                   <div>Action</div>
                 </div>
                 {filteredLeads.map((lead) => (
-                  <div key={lead.id} className="grid grid-cols-[1.3fr_0.7fr_0.8fr_0.8fr_0.8fr_0.8fr] gap-3 border-b border-[#f0e8d8] px-4 py-3 text-sm last:border-b-0">
-                    <button onClick={() => openLead(lead)} className="text-left font-semibold text-[#171717]">{lead.name}</button>
+                  <div
+                    key={lead.id}
+                    onClick={() => openLead(lead)}
+                    className="grid cursor-pointer grid-cols-[1.3fr_0.7fr_0.8fr_0.8fr_0.8fr_0.8fr] gap-3 border-b border-[#f0e8d8] px-4 py-3 text-sm last:border-b-0 hover:bg-[#fcfaef]"
+                  >
+                    <p className="text-left font-semibold text-[#171717]">{lead.name}</p>
                     <div className={`w-fit rounded-full border px-2.5 py-1 text-xs font-semibold ${gradeAccent[lead.grade]}`}>{lead.grade}</div>
                     <div>{lead.source}</div>
                     <div>{lead.stage}</div>
                     <div>{formatDate(lead.nextFollowUp)}</div>
                     <div className="flex gap-2">
-                      <button onClick={() => { setDraft({ ...lead }); setShowModal(true); }} className="rounded-full border border-[#e7e0d0] px-2 py-1">Edit</button>
-                      <button onClick={() => deleteLead(lead.id)} className="rounded-full border border-[#e7e0d0] px-2 py-1">Delete</button>
+                      <button onClick={(event) => { event.stopPropagation(); setDraft({ ...lead }); setShowModal(true); }} className="rounded-full border border-[#e7e0d0] px-2 py-1">Edit</button>
+                      <button onClick={(event) => { event.stopPropagation(); void deleteLead(lead.id); }} className="rounded-full border border-[#e7e0d0] px-2 py-1">Delete</button>
                     </div>
                   </div>
                 ))}
@@ -1771,14 +1801,37 @@ export default function Home() {
             </div>
           )}
 
-          {selectedLead && (
-            <section ref={leadDetailRef} className="mt-6 rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm">
+          {showLeadDetailDrawer ? (
+            <button
+              onClick={() => setIsMasterLeadDrawerOpen(false)}
+              className="fixed inset-0 z-40 bg-black/35"
+              aria-label="Close lead detail drawer"
+            />
+          ) : null}
+
+          {(showInlineLeadDetail || showLeadDetailDrawer) && selectedLead ? (
+            <section
+              ref={leadDetailRef}
+              className={showLeadDetailDrawer
+                ? "fixed inset-y-0 right-0 z-50 w-full overflow-y-auto border-l border-[#e7e0d0] bg-white p-5 shadow-2xl sm:max-w-2xl"
+                : "mt-6 rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-sm"}
+            >
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Lead detail</p>
                   <h3 className="mt-2 text-xl font-semibold">{selectedLead.name}</h3>
                 </div>
-                <div className={`rounded-full border px-3 py-1 text-xs font-semibold ${gradeAccent[selectedLead.grade]}`}>{gradeLabels[selectedLead.grade]}</div>
+                <div className="flex items-center gap-2">
+                  <div className={`rounded-full border px-3 py-1 text-xs font-semibold ${gradeAccent[selectedLead.grade]}`}>{gradeLabels[selectedLead.grade]}</div>
+                  {showLeadDetailDrawer ? (
+                    <button
+                      onClick={() => setIsMasterLeadDrawerOpen(false)}
+                      className="rounded-full border border-[#e7e0d0] px-3 py-1 text-xs font-semibold"
+                    >
+                      Close
+                    </button>
+                  ) : null}
+                </div>
               </div>
               <div className="mt-6 grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
                 <div className="space-y-4 rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-4">
@@ -1914,7 +1967,7 @@ export default function Home() {
                 </div>
               </div>
             </section>
-          )}
+          ) : null}
         </main>
       </div>
 
