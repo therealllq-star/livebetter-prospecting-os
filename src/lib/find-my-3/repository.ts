@@ -101,7 +101,7 @@ export async function getFm3ExternalCache(client: SupabaseClient, sourceSystem: 
     .maybeSingle();
 
   if (error) throw error;
-  return (data as Fm3ExternalCache | null) ?? null;
+  return data as Fm3ExternalCache | null;
 }
 
 export async function getFm3ProjectFoundation(client: SupabaseClient, projectId: string): Promise<Fm3ProjectFoundation | null> {
