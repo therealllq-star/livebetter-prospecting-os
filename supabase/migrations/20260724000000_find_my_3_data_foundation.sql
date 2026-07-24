@@ -71,7 +71,7 @@ create table if not exists public.fm3_project_metrics (
   metric_value_numeric numeric(14, 4),
   metric_value_text text,
   metric_value_boolean boolean,
-  metric_unit text,
+  measurement_unit text,
   metric_period text,
   as_of_date date,
   source_system text not null,

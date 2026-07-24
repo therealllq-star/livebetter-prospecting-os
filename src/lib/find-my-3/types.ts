@@ -60,7 +60,7 @@ export interface Fm3ProjectMetric {
   metric_value_numeric: number | null;
   metric_value_text: string | null;
   metric_value_boolean: boolean | null;
-  metric_unit: string | null;
+  measurement_unit: string | null;
   metric_period: string | null;
   as_of_date: string | null;
   source_system: Fm3SourceSystem | string;
