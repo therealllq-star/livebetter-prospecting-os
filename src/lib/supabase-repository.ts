@@ -452,16 +452,13 @@ function normalizeActivityType(type: ActivityEntry["type"]) {
 }
 
 export async function createSupabaseAppointment(client: SupabaseClient, leadId: string, appointmentDate: string, notes: string) {
-  const payload: SupabaseAppointmentRecord = {
+  const payload: Pick<SupabaseAppointmentRecord, "lead_id" | "appointment_time"> = {
     lead_id: leadId,
     appointment_time: appointmentDate || null,
-    status: "scheduled",
-    notes: notes || null,
-    created_at: new Date().toISOString(),
   };
 
   const { error } = await client.from("appointments").insert(payload);
-  if (error) throw error;
+  if (error) throw new Error(formatSupabaseError(error, "Creating the appointment"));
 }
 
 export async function createSupabaseTask(client: SupabaseClient, leadId: string, title: string, dueAt: string, description: string) {

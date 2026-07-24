@@ -747,6 +747,26 @@ export default function Home() {
     return payload?.response || "AI Leo returned an empty response.";
   };
 
+  const extractClientReadyMessage = (raw: string) => {
+    const trimmed = raw.trim();
+    if (!trimmed) return "";
+
+    // Prefer explicit tag output when model follows instruction exactly.
+    const tagged = trimmed.match(/<message>([\s\S]*?)<\/message>/i);
+    if (tagged?.[1]) {
+      return tagged[1].trim();
+    }
+
+    // Fall back to removing common reasoning labels if the model adds them.
+    const lines = trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .filter((line) => !/^(analysis|reasoning|observation|context|objective|rationale|notes?|why|strategy)\s*[:\-]/i.test(line));
+
+    return lines.join("\n").trim();
+  };
+
   const askAiLeo = async (prompt: string) => {
     if (!selectedLead) return;
 
@@ -782,7 +802,7 @@ export default function Home() {
     try {
       const result = await requestAiLeoForLead(currentQueueLead, prompt);
       if (options?.asMessageDraft) {
-        setQueueAiMessageDraft(result);
+        setQueueAiMessageDraft(extractClientReadyMessage(result));
       } else {
         setQueueAiResponse(result);
       }
@@ -1806,7 +1826,10 @@ export default function Home() {
                             <button onClick={() => { void handleLeadAction(currentQueueLead.id, "WHATSAPP"); }} className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm">WhatsApp</button>
                             <button
                               onClick={() => {
-                                void runQueueAi("Draft one short context-aware message I can send this lead now via WhatsApp. Keep it natural and specific.", { asMessageDraft: true });
+                                void runQueueAi(
+                                  "Draft one short context-aware WhatsApp message I can send this lead now. Return ONLY the final client-ready message wrapped in <message>...</message>. Do not include any analysis, reasoning, labels, bullets, or preamble.",
+                                  { asMessageDraft: true }
+                                );
                               }}
                               className="rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm"
                             >
