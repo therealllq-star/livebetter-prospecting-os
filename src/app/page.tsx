@@ -25,6 +25,7 @@ import {
   type Lead,
   type LeadClientSide,
   type LeadGrade,
+  type LeadGroup,
   type LeadOutcome,
   type LeadSource,
   type LeadStage,
@@ -34,12 +35,16 @@ import {
 import {
   createSupabaseActivity,
   createSupabaseAppointment,
+  createSupabaseLeadGroup,
   deleteSupabaseActivity,
   createSupabaseLead,
+  deleteSupabaseLeadGroup,
   deleteSupabaseLead,
-  fetchSupabaseLeads,
+  fetchSupabaseCrmSnapshot,
   inspectSupabaseLeadRead,
   isValidSupabaseUuid,
+  setSupabaseLeadGroupAssignments,
+  updateSupabaseLeadGroup,
   updateSupabaseLead,
 } from "@/lib/supabase-repository";
 
@@ -99,6 +104,54 @@ type CalendarAppointmentCta = {
 
 type PushEnableState = "idle" | "enabling" | "enabled" | "denied" | "unsupported" | "error";
 
+type GroupManagerDraft = {
+  name: string;
+  color: string;
+  isActive: boolean;
+};
+
+const DEFAULT_GROUP_COLOR = "#f1e6cc";
+
+function sortLeadGroups(groups: LeadGroup[]) {
+  return groups.slice().sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function normalizeGroupName(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function getLeadGroupChipStyle(color?: string | null) {
+  const backgroundColor = color?.trim() || DEFAULT_GROUP_COLOR;
+  return {
+    backgroundColor,
+    borderColor: backgroundColor,
+    color: "#5f5a52",
+  };
+}
+
+function renderLeadGroupSummary(groups: LeadGroup[], options?: { limit?: number; emptyLabel?: string }) {
+  const limit = options?.limit ?? 2;
+  const emptyLabel = options?.emptyLabel ?? "No groups";
+
+  if (!groups.length) {
+    return <span className="text-xs text-[#8a8478]">{emptyLabel}</span>;
+  }
+
+  const visibleGroups = groups.slice(0, limit);
+  const hiddenCount = Math.max(0, groups.length - visibleGroups.length);
+
+  return (
+    <div className="flex flex-wrap items-center gap-2" title={groups.map((group) => group.name).join(", ")}>
+      {visibleGroups.map((group) => (
+        <span key={group.id} className="rounded-full border px-2 py-1 text-xs font-medium" style={getLeadGroupChipStyle(group.color)}>
+          {group.name}
+        </span>
+      ))}
+      {hiddenCount > 0 ? <span className="text-xs font-semibold text-[#5f5a52]">+{hiddenCount}</span> : null}
+    </div>
+  );
+}
+
 function urlBase64ToArrayBuffer(base64String: string): ArrayBuffer {
   const padded = base64String.padEnd(Math.ceil(base64String.length / 4) * 4, "=");
   const base64 = padded.replace(/-/g, "+").replace(/_/g, "/");
@@ -120,13 +173,26 @@ export default function Home() {
   const leadDetailRef = useRef<HTMLElement | null>(null);
   const [activeView, setActiveView] = useState<View>("Dashboard");
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [groups, setGroups] = useState<LeadGroup[]>([]);
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [gradeFilter, setGradeFilter] = useState<LeadGrade | "All">("All");
   const [stageFilter, setStageFilter] = useState<LeadStage | "All">("All");
   const [sourceFilter, setSourceFilter] = useState<LeadSource | "All">("All");
+  const [groupFilterIds, setGroupFilterIds] = useState<string[]>([]);
   const [draft, setDraft] = useState<Lead>(emptyLead);
   const [showModal, setShowModal] = useState(false);
+  const [showDetailGroupPicker, setShowDetailGroupPicker] = useState(false);
+  const [showDraftGroupPicker, setShowDraftGroupPicker] = useState(false);
+  const [showGroupFilterMenu, setShowGroupFilterMenu] = useState(false);
+  const [showGroupManager, setShowGroupManager] = useState(false);
+  const [detailGroupSearch, setDetailGroupSearch] = useState("");
+  const [draftGroupSearch, setDraftGroupSearch] = useState("");
+  const [groupFilterSearch, setGroupFilterSearch] = useState("");
+  const [groupManagerDrafts, setGroupManagerDrafts] = useState<Record<string, GroupManagerDraft>>({});
+  const [newGroupName, setNewGroupName] = useState("");
+  const [newGroupColor, setNewGroupColor] = useState(DEFAULT_GROUP_COLOR);
+  const [groupUiError, setGroupUiError] = useState<string | null>(null);
   const [scriptLibrary, setScriptLibrary] = useState<ScriptLibrary>(scriptDefaults);
   const [currentQueueLeadId, setCurrentQueueLeadId] = useState<string | null>(null);
   const [queueNoteInput, setQueueNoteInput] = useState("");
@@ -227,9 +293,11 @@ export default function Home() {
         return;
       }
 
-      const leadsFromSupabase = await fetchSupabaseLeads(supabaseClient);
+      const crmSnapshot = await fetchSupabaseCrmSnapshot(supabaseClient);
+      const leadsFromSupabase = crmSnapshot.leads;
       // Use successfully fetched Supabase leads as the Master CRM dataset.
       setLeads(leadsFromSupabase);
+      setGroups(crmSnapshot.groups);
       if (options?.focusLeadId) {
         const focusedLead = leadsFromSupabase.find((lead) => lead.id === options.focusLeadId);
         if (focusedLead) setSelectedLeadId(focusedLead.id);
@@ -249,6 +317,7 @@ export default function Home() {
       });
     } catch (error) {
       setLeads([]);
+      setGroups([]);
       setSelectedLeadId(null);
       setSupabaseReadState({
         status: "error",
@@ -410,6 +479,11 @@ export default function Home() {
   }, [leads, scriptLibrary]);
 
   const selectedLead = leads.find((lead) => lead.id === selectedLeadId) ?? null;
+  const activeGroups = useMemo(() => sortLeadGroups(groups.filter((group) => group.isActive)), [groups]);
+  const selectedGroupFilters = useMemo(
+    () => activeGroups.filter((group) => groupFilterIds.includes(group.id)),
+    [activeGroups, groupFilterIds]
+  );
   const unreadNotificationCount = useMemo(() => inboundNotifications.filter((notification) => notification.unread).length, [inboundNotifications]);
   const activeToastNotifications = useMemo(
     () => toastNotificationIds
@@ -714,9 +788,10 @@ export default function Home() {
       const matchesGrade = gradeFilter === "All" || lead.grade === gradeFilter;
       const matchesStage = stageFilter === "All" || lead.stage === stageFilter;
       const matchesSource = sourceFilter === "All" || lead.source === sourceFilter;
-      return matchesSearch && matchesGrade && matchesStage && matchesSource;
+      const matchesGroups = groupFilterIds.length === 0 || lead.groups.some((group) => groupFilterIds.includes(group.id));
+      return matchesSearch && matchesGrade && matchesStage && matchesSource && matchesGroups;
     });
-  }, [leads, gradeFilter, search, sourceFilter, stageFilter]);
+  }, [groupFilterIds, leads, gradeFilter, search, sourceFilter, stageFilter]);
 
   const newLeadQueueLeads = useMemo(
     () => [...leads].filter((lead) => lead.stage === "New Lead" && !isCompletedQueueLead(lead.id)).sort(compareNewestLeadFirst),
@@ -789,6 +864,218 @@ export default function Home() {
   const updateLead = (leadId: string, updates: Partial<Lead>) => {
     setLeads((prev) => prev.map((lead) => (lead.id === leadId ? { ...lead, ...updates } : lead)));
   };
+
+  const updateLeadGroupsInState = useCallback((group: LeadGroup) => {
+    setLeads((prev) => prev.map((lead) => ({
+      ...lead,
+      groups: sortLeadGroups(lead.groups.map((item) => (item.id === group.id ? group : item))),
+    })));
+    setDraft((prev) => ({
+      ...prev,
+      groups: sortLeadGroups(prev.groups.map((item) => (item.id === group.id ? group : item))),
+    }));
+  }, []);
+
+  const removeGroupFromState = useCallback((groupId: string) => {
+    setLeads((prev) => prev.map((lead) => ({ ...lead, groups: lead.groups.filter((group) => group.id !== groupId) })));
+    setDraft((prev) => ({ ...prev, groups: prev.groups.filter((group) => group.id !== groupId) }));
+    setGroupFilterIds((prev) => prev.filter((currentId) => currentId !== groupId));
+  }, []);
+
+  const findGroupByName = useCallback((name: string) => {
+    const normalized = normalizeGroupName(name);
+    return groups.find((group) => normalizeGroupName(group.name) === normalized) ?? null;
+  }, [groups]);
+
+  const ensureGroupExists = useCallback(async (name: string, color?: string | null) => {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      throw new Error("Group name is required.");
+    }
+
+    const existingGroup = findGroupByName(trimmedName);
+    const client = createClient();
+
+    if (existingGroup) {
+      if (!existingGroup.isActive) {
+        const reactivatedGroup = await updateSupabaseLeadGroup(client, existingGroup.id, {
+          name: trimmedName,
+          color: color ?? existingGroup.color ?? DEFAULT_GROUP_COLOR,
+          isActive: true,
+        });
+        setGroups((prev) => sortLeadGroups(prev.map((group) => (group.id === reactivatedGroup.id ? reactivatedGroup : group))));
+        updateLeadGroupsInState(reactivatedGroup);
+        return reactivatedGroup;
+      }
+
+      return existingGroup;
+    }
+
+    const createdGroup = await createSupabaseLeadGroup(client, { name: trimmedName, color: color ?? DEFAULT_GROUP_COLOR });
+    setGroups((prev) => sortLeadGroups([...prev, createdGroup]));
+    return createdGroup;
+  }, [findGroupByName, updateLeadGroupsInState]);
+
+  const saveLeadGroups = useCallback(async (leadId: string, nextGroups: LeadGroup[]) => {
+    const currentLead = leads.find((lead) => lead.id === leadId);
+    if (!currentLead) {
+      throw new Error("Lead could not be found for this action.");
+    }
+
+    const client = createClient();
+    const sortedGroups = sortLeadGroups(nextGroups.filter((group) => group.isActive));
+    await setSupabaseLeadGroupAssignments(client, leadId, sortedGroups.map((group) => group.id));
+    setLeads((prev) => prev.map((lead) => (lead.id === leadId ? { ...lead, groups: sortedGroups } : lead)));
+    setDraft((prev) => (prev.id === leadId ? { ...prev, groups: sortedGroups } : prev));
+  }, [leads]);
+
+  const openGroupManager = useCallback(() => {
+    setGroupManagerDrafts(
+      Object.fromEntries(
+        groups.map((group) => [group.id, { name: group.name, color: group.color ?? DEFAULT_GROUP_COLOR, isActive: group.isActive }])
+      )
+    );
+    setGroupUiError(null);
+    setNewGroupName("");
+    setNewGroupColor(DEFAULT_GROUP_COLOR);
+    setShowGroupManager(true);
+  }, [groups]);
+
+  const toggleGroupFilter = (groupId: string) => {
+    setGroupFilterIds((prev) => (prev.includes(groupId) ? prev.filter((currentId) => currentId !== groupId) : [...prev, groupId]));
+  };
+
+  const toggleSelectedLeadGroup = async (group: LeadGroup) => {
+    if (!selectedLead) return;
+
+    const nextGroups = selectedLead.groups.some((item) => item.id === group.id)
+      ? selectedLead.groups.filter((item) => item.id !== group.id)
+      : sortLeadGroups([...selectedLead.groups, group]);
+
+    try {
+      setGroupUiError(null);
+      await saveLeadGroups(selectedLead.id, nextGroups);
+    } catch (error) {
+      setGroupUiError(error instanceof Error ? error.message : "Unable to save lead groups.");
+    }
+  };
+
+  const createAndAssignGroupToSelectedLead = async () => {
+    if (!selectedLead || !detailGroupSearch.trim()) return;
+
+    try {
+      setGroupUiError(null);
+      const group = await ensureGroupExists(detailGroupSearch);
+      const nextGroups = selectedLead.groups.some((item) => item.id === group.id)
+        ? selectedLead.groups
+        : sortLeadGroups([...selectedLead.groups, group]);
+      await saveLeadGroups(selectedLead.id, nextGroups);
+      setDetailGroupSearch("");
+    } catch (error) {
+      setGroupUiError(error instanceof Error ? error.message : "Unable to create this group.");
+    }
+  };
+
+  const toggleDraftGroup = (group: LeadGroup) => {
+    setDraft((prev) => {
+      const exists = prev.groups.some((item) => item.id === group.id);
+      return {
+        ...prev,
+        groups: exists ? prev.groups.filter((item) => item.id !== group.id) : sortLeadGroups([...prev.groups, group]),
+      };
+    });
+  };
+
+  const createAndAssignGroupToDraft = async () => {
+    if (!draftGroupSearch.trim()) return;
+
+    try {
+      setGroupUiError(null);
+      const group = await ensureGroupExists(draftGroupSearch);
+      setDraft((prev) => ({
+        ...prev,
+        groups: prev.groups.some((item) => item.id === group.id) ? prev.groups : sortLeadGroups([...prev.groups, group]),
+      }));
+      setDraftGroupSearch("");
+    } catch (error) {
+      setGroupUiError(error instanceof Error ? error.message : "Unable to create this group.");
+    }
+  };
+
+  const saveManagedGroup = async (groupId: string) => {
+    const editor = groupManagerDrafts[groupId];
+    if (!editor) return;
+
+    try {
+      setGroupUiError(null);
+      const updatedGroup = await updateSupabaseLeadGroup(createClient(), groupId, {
+        name: editor.name,
+        color: editor.color,
+        isActive: editor.isActive,
+      });
+
+      setGroups((prev) => sortLeadGroups(prev.map((group) => (group.id === updatedGroup.id ? updatedGroup : group))));
+      if (updatedGroup.isActive) {
+        updateLeadGroupsInState(updatedGroup);
+      } else {
+        removeGroupFromState(updatedGroup.id);
+      }
+    } catch (error) {
+      setGroupUiError(error instanceof Error ? error.message : "Unable to update this group.");
+    }
+  };
+
+  const deleteManagedGroup = async (groupId: string) => {
+    if (!window.confirm("Delete this group? Leads will remain and only the group relationship will be removed.")) {
+      return;
+    }
+
+    try {
+      setGroupUiError(null);
+      await deleteSupabaseLeadGroup(createClient(), groupId);
+      setGroups((prev) => prev.filter((group) => group.id !== groupId));
+      setGroupManagerDrafts((prev) => {
+        const next = { ...prev };
+        delete next[groupId];
+        return next;
+      });
+      removeGroupFromState(groupId);
+    } catch (error) {
+      setGroupUiError(error instanceof Error ? error.message : "Unable to delete this group.");
+    }
+  };
+
+  const createManagedGroup = async () => {
+    try {
+      setGroupUiError(null);
+      const createdGroup = await ensureGroupExists(newGroupName, newGroupColor);
+      setGroupManagerDrafts((prev) => ({
+        ...prev,
+        [createdGroup.id]: {
+          name: createdGroup.name,
+          color: createdGroup.color ?? DEFAULT_GROUP_COLOR,
+          isActive: createdGroup.isActive,
+        },
+      }));
+      setNewGroupName("");
+      setNewGroupColor(DEFAULT_GROUP_COLOR);
+    } catch (error) {
+      setGroupUiError(error instanceof Error ? error.message : "Unable to create this group.");
+    }
+  };
+
+  const detailGroupResults = useMemo(
+    () => activeGroups.filter((group) => group.name.toLowerCase().includes(detailGroupSearch.toLowerCase())),
+    [activeGroups, detailGroupSearch]
+  );
+  const draftGroupResults = useMemo(
+    () => activeGroups.filter((group) => group.name.toLowerCase().includes(draftGroupSearch.toLowerCase())),
+    [activeGroups, draftGroupSearch]
+  );
+  const filterGroupResults = useMemo(
+    () => activeGroups.filter((group) => group.name.toLowerCase().includes(groupFilterSearch.toLowerCase())),
+    [activeGroups, groupFilterSearch]
+  );
 
   const sortActivitiesNewestFirst = (activities: ActivityEntry[]) => {
     return [...activities].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
@@ -1229,14 +1516,15 @@ export default function Home() {
       activityToAppend = await createSupabaseActivity(client, savedLead.id, activityDraft);
     }
 
-      const persistedLead: Lead = {
+    const persistedLead: Lead = {
       ...savedLead,
+      groups: currentLead.groups,
       lastContact: mergedLead.lastContact,
       lastOutcome: mergedLead.lastOutcome,
       lastOutcomeNotes: mergedLead.lastOutcomeNotes,
       queueReason: mergedLead.queueReason,
       focusSummary: mergedLead.focusSummary,
-        activity: activityToAppend ? sortActivitiesNewestFirst([...currentLead.activity, activityToAppend]) : sortActivitiesNewestFirst(currentLead.activity),
+      activity: activityToAppend ? sortActivitiesNewestFirst([...currentLead.activity, activityToAppend]) : sortActivitiesNewestFirst(currentLead.activity),
     };
 
     setLeads((prev) => prev.map((lead) => (lead.id === leadId ? persistedLead : lead)));
@@ -1338,15 +1626,18 @@ export default function Home() {
           persistedActivities.push(persistedActivity);
         }
 
-          if (toSave.appointmentDate && previousLead?.appointmentDate !== toSave.appointmentDate) {
-            await createSupabaseAppointment(client, savedLead.id, toSave.appointmentDate, toSave.remarks || "");
-          }
+        if (toSave.appointmentDate && previousLead?.appointmentDate !== toSave.appointmentDate) {
+          await createSupabaseAppointment(client, savedLead.id, toSave.appointmentDate, toSave.remarks || "");
+        }
+
+        await setSupabaseLeadGroupAssignments(client, savedLead.id, toSave.groups.map((group) => group.id));
 
         persistedId = savedLead.id;
         setLeads((prev) =>
-            prev.map((lead) => (lead.id === normalized.id ? {
+          prev.map((lead) => (lead.id === normalized.id ? {
               ...savedLead,
-                activity: sortActivitiesNewestFirst([...lead.activity, ...persistedActivities]),
+              groups: sortLeadGroups(toSave.groups),
+              activity: sortActivitiesNewestFirst([...lead.activity, ...persistedActivities]),
             } : lead))
         );
       } else {
@@ -1359,11 +1650,12 @@ export default function Home() {
           createdAt: new Date().toISOString(),
         };
         const persistedCreatedActivity = await createSupabaseActivity(client, savedLead.id, createdActivity);
-          if (toSave.appointmentDate) {
-            await createSupabaseAppointment(client, savedLead.id, toSave.appointmentDate, toSave.remarks || "");
-          }
+        if (toSave.appointmentDate) {
+          await createSupabaseAppointment(client, savedLead.id, toSave.appointmentDate, toSave.remarks || "");
+        }
+        await setSupabaseLeadGroupAssignments(client, savedLead.id, toSave.groups.map((group) => group.id));
         persistedId = savedLead.id;
-          setLeads((prev) => [{ ...savedLead, activity: sortActivitiesNewestFirst([persistedCreatedActivity]) }, ...prev]);
+        setLeads((prev) => [{ ...savedLead, groups: sortLeadGroups(toSave.groups), activity: sortActivitiesNewestFirst([persistedCreatedActivity]) }, ...prev]);
       }
     } catch (error) {
       console.error("Failed to save lead to Supabase:", error);
@@ -1837,15 +2129,57 @@ export default function Home() {
                   <option value="Organic">Organic</option>
                   <option value="Other">Other</option>
                 </select>
+                <div className="relative">
+                  <button onClick={() => setShowGroupFilterMenu((prev) => !prev)} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2 text-sm">
+                    {selectedGroupFilters.length ? `Groups: ${selectedGroupFilters.map((group) => group.name).join(", ")}` : "Groups"}
+                  </button>
+                  {showGroupFilterMenu ? (
+                    <div className="absolute left-0 top-full z-30 mt-2 w-72 rounded-[20px] border border-[#e7e0d0] bg-white p-3 shadow-xl">
+                      <input
+                        value={groupFilterSearch}
+                        onChange={(event) => setGroupFilterSearch(event.target.value)}
+                        placeholder="Search groups"
+                        className="w-full rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2 text-sm"
+                      />
+                      <div className="mt-3 max-h-64 space-y-2 overflow-y-auto">
+                        {filterGroupResults.map((group) => (
+                          <label key={group.id} className="flex items-center gap-3 rounded-2xl border border-[#f0e8d8] px-3 py-2 text-sm">
+                            <input type="checkbox" checked={groupFilterIds.includes(group.id)} onChange={() => toggleGroupFilter(group.id)} />
+                            <span className="rounded-full border px-2 py-1 text-xs font-medium" style={getLeadGroupChipStyle(group.color)}>{group.name}</span>
+                          </label>
+                        ))}
+                        {!filterGroupResults.length ? <p className="text-sm text-[#8a8478]">No groups found.</p> : null}
+                      </div>
+                      <div className="mt-3 flex items-center justify-between">
+                        <button onClick={() => setGroupFilterIds([])} className="text-sm font-semibold text-[#5f5a52] underline">Clear</button>
+                        <button onClick={() => setShowGroupFilterMenu(false)} className="rounded-full border border-[#e7e0d0] px-3 py-1 text-xs font-semibold">Done</button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+                <button onClick={openGroupManager} className="rounded-2xl border border-[#e7e0d0] px-4 py-2 text-sm font-semibold">Manage Groups</button>
                 <button onClick={() => setShowModal(true)} className="rounded-2xl bg-[#171717] px-4 py-2 text-sm font-semibold text-white">Add Lead</button>
               </div>
 
+              {selectedGroupFilters.length ? (
+                <div className="flex flex-wrap items-center gap-2 text-sm text-[#5f5a52]">
+                  <span className="font-semibold">Groups:</span>
+                  {selectedGroupFilters.map((group) => (
+                    <button key={group.id} onClick={() => toggleGroupFilter(group.id)} className="rounded-full border px-2 py-1 text-xs font-medium" style={getLeadGroupChipStyle(group.color)}>
+                      {group.name} ×
+                    </button>
+                  ))}
+                  <button onClick={() => setGroupFilterIds([])} className="text-xs font-semibold underline">Clear</button>
+                </div>
+              ) : null}
+
               <div className="overflow-hidden rounded-[24px] border border-[#e7e0d0] bg-white shadow-sm">
-                <div className="grid grid-cols-[1.3fr_0.7fr_0.8fr_0.8fr_0.8fr_0.8fr] gap-3 border-b border-[#e7e0d0] bg-[#f8f3e5] px-4 py-3 text-xs font-semibold uppercase tracking-[0.2em] text-[#5f5a52]">
+                <div className="grid grid-cols-[1.2fr_0.7fr_0.8fr_0.8fr_1fr_0.8fr_0.8fr] gap-3 border-b border-[#e7e0d0] bg-[#f8f3e5] px-4 py-3 text-xs font-semibold uppercase tracking-[0.2em] text-[#5f5a52]">
                   <div>Name</div>
                   <div>Grade</div>
                   <div>Source</div>
                   <div>Stage</div>
+                  <div>Groups</div>
                   <div>Next Follow-up</div>
                   <div>Action</div>
                 </div>
@@ -1853,12 +2187,13 @@ export default function Home() {
                   <div
                     key={lead.id}
                     onClick={() => openLead(lead)}
-                    className="grid cursor-pointer grid-cols-[1.3fr_0.7fr_0.8fr_0.8fr_0.8fr_0.8fr] gap-3 border-b border-[#f0e8d8] px-4 py-3 text-sm last:border-b-0 hover:bg-[#fcfaef]"
+                    className="grid cursor-pointer grid-cols-[1.2fr_0.7fr_0.8fr_0.8fr_1fr_0.8fr_0.8fr] gap-3 border-b border-[#f0e8d8] px-4 py-3 text-sm last:border-b-0 hover:bg-[#fcfaef]"
                   >
                     <p className="text-left font-semibold text-[#171717]">{lead.name}</p>
                     <div className={`w-fit rounded-full border px-2.5 py-1 text-xs font-semibold ${gradeAccent[lead.grade]}`}>{lead.grade}</div>
                     <div>{lead.source}</div>
                     <div>{lead.stage}</div>
+                    <div>{renderLeadGroupSummary(lead.groups, { limit: 2, emptyLabel: "—" })}</div>
                     <div>{formatDate(lead.nextFollowUp)}</div>
                     <div className="flex gap-2">
                       <button onClick={(event) => { event.stopPropagation(); setDraft({ ...lead }); setShowModal(true); }} className="rounded-full border border-[#e7e0d0] px-2 py-1">Edit</button>
@@ -2277,6 +2612,38 @@ export default function Home() {
                     <p className="text-sm">Lead type: {selectedLead.leadType}</p>
                     <p className="text-sm">Client side: {selectedLead.clientSide ?? "—"}</p>
                   </div>
+                  <div className="rounded-2xl border border-[#e7e0d0] bg-white p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Groups</p>
+                      <button onClick={() => setShowDetailGroupPicker((prev) => !prev)} className="rounded-full border border-[#e7e0d0] px-3 py-1 text-xs font-semibold">+ Add group</button>
+                    </div>
+                    <div className="mt-3">{renderLeadGroupSummary(selectedLead.groups, { limit: 3 })}</div>
+                    {showDetailGroupPicker ? (
+                      <div className="mt-3 rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-3">
+                        <input
+                          value={detailGroupSearch}
+                          onChange={(event) => setDetailGroupSearch(event.target.value)}
+                          placeholder="Search groups"
+                          className="w-full rounded-2xl border border-[#e7e0d0] bg-white px-3 py-2 text-sm"
+                        />
+                        <div className="mt-3 max-h-56 space-y-2 overflow-y-auto">
+                          {detailGroupResults.map((group) => (
+                            <label key={group.id} className="flex items-center gap-3 rounded-2xl border border-[#e7e0d0] bg-white px-3 py-2 text-sm">
+                              <input type="checkbox" checked={selectedLead.groups.some((item) => item.id === group.id)} onChange={() => { void toggleSelectedLeadGroup(group); }} />
+                              <span className="rounded-full border px-2 py-1 text-xs font-medium" style={getLeadGroupChipStyle(group.color)}>{group.name}</span>
+                            </label>
+                          ))}
+                          {!detailGroupResults.length ? <p className="text-sm text-[#8a8478]">No groups found.</p> : null}
+                        </div>
+                        {detailGroupSearch.trim() && !findGroupByName(detailGroupSearch) ? (
+                          <button onClick={() => { void createAndAssignGroupToSelectedLead(); }} className="mt-3 rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm font-semibold">
+                            + Create "{detailGroupSearch.trim()}"
+                          </button>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {groupUiError ? <p className="mt-3 text-sm text-[#b08c2c]">{groupUiError}</p> : null}
+                  </div>
                   <div>
                     <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Current stage</p>
                     <p className="mt-2 text-sm">{selectedLead.stage}</p>
@@ -2558,8 +2925,40 @@ export default function Home() {
               <input value={draft.nextAction} onChange={(event) => setDraft((prev) => ({ ...prev, nextAction: event.target.value }))} placeholder="Next Action" className="rounded-2xl border border-[#e7e0d0] px-3 py-2" />
               <input value={draft.remarks} onChange={(event) => setDraft((prev) => ({ ...prev, remarks: event.target.value }))} placeholder="Remarks" className="rounded-2xl border border-[#e7e0d0] px-3 py-2" />
               <input type="date" value={draft.appointmentDate?.slice(0, 10) ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, appointmentDate: event.target.value }))} className="rounded-2xl border border-[#e7e0d0] px-3 py-2" />
+              <div className="space-y-3 md:col-span-2">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-[#171717]">Groups</p>
+                  <button onClick={() => setShowDraftGroupPicker((prev) => !prev)} className="rounded-full border border-[#e7e0d0] px-3 py-1 text-xs font-semibold">+ Add group</button>
+                </div>
+                <div>{renderLeadGroupSummary(draft.groups, { limit: 4 })}</div>
+                {showDraftGroupPicker ? (
+                  <div className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-3">
+                    <input
+                      value={draftGroupSearch}
+                      onChange={(event) => setDraftGroupSearch(event.target.value)}
+                      placeholder="Search groups"
+                      className="w-full rounded-2xl border border-[#e7e0d0] bg-white px-3 py-2 text-sm"
+                    />
+                    <div className="mt-3 max-h-56 space-y-2 overflow-y-auto">
+                      {draftGroupResults.map((group) => (
+                        <label key={group.id} className="flex items-center gap-3 rounded-2xl border border-[#e7e0d0] bg-white px-3 py-2 text-sm">
+                          <input type="checkbox" checked={draft.groups.some((item) => item.id === group.id)} onChange={() => toggleDraftGroup(group)} />
+                          <span className="rounded-full border px-2 py-1 text-xs font-medium" style={getLeadGroupChipStyle(group.color)}>{group.name}</span>
+                        </label>
+                      ))}
+                      {!draftGroupResults.length ? <p className="text-sm text-[#8a8478]">No groups found.</p> : null}
+                    </div>
+                    {draftGroupSearch.trim() && !findGroupByName(draftGroupSearch) ? (
+                      <button onClick={() => { void createAndAssignGroupToDraft(); }} className="mt-3 rounded-full border border-[#e7e0d0] bg-white px-3 py-2 text-sm font-semibold">
+                        + Create "{draftGroupSearch.trim()}"
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
             </div>
             {validationMessage ? <p className="mt-4 text-sm text-[#b08c2c]">{validationMessage}</p> : null}
+            {groupUiError ? <p className="mt-2 text-sm text-[#b08c2c]">{groupUiError}</p> : null}
             <div className="mt-6 flex justify-end gap-3">
               <button onClick={() => { setShowModal(false); setDraft(emptyLead); setValidationMessage(""); }} className="rounded-2xl border border-[#e7e0d0] px-4 py-2">Cancel</button>
               <button onClick={saveDraft} className="rounded-2xl bg-[#171717] px-4 py-2 text-white">Save Lead</button>
@@ -2567,6 +2966,71 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      {showGroupManager ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-3xl rounded-[24px] border border-[#e7e0d0] bg-white p-6 shadow-xl">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Groups</p>
+                <h3 className="mt-2 text-xl font-semibold">Manage groups</h3>
+              </div>
+              <button onClick={() => setShowGroupManager(false)} className="rounded-full border border-[#e7e0d0] px-3 py-2 text-sm">Close</button>
+            </div>
+            <div className="mt-6 rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-4">
+              <p className="text-sm font-semibold text-[#171717]">Create group</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-[1fr_120px_auto]">
+                <input value={newGroupName} onChange={(event) => setNewGroupName(event.target.value)} placeholder="Group name" className="rounded-2xl border border-[#e7e0d0] bg-white px-3 py-2" />
+                <input type="color" value={newGroupColor} onChange={(event) => setNewGroupColor(event.target.value)} className="h-11 w-full rounded-2xl border border-[#e7e0d0] bg-white px-2 py-2" />
+                <button onClick={() => { void createManagedGroup(); }} className="rounded-2xl bg-[#171717] px-4 py-2 text-sm font-semibold text-white">Create</button>
+              </div>
+            </div>
+            {groupUiError ? <p className="mt-4 text-sm text-[#b08c2c]">{groupUiError}</p> : null}
+            <div className="mt-6 max-h-[420px] space-y-3 overflow-y-auto pr-1">
+              {sortLeadGroups(groups).map((group) => {
+                const editor = groupManagerDrafts[group.id] ?? { name: group.name, color: group.color ?? DEFAULT_GROUP_COLOR, isActive: group.isActive };
+                return (
+                  <div key={group.id} className="rounded-2xl border border-[#e7e0d0] p-4">
+                    <div className="grid gap-3 md:grid-cols-[1fr_120px_140px_auto_auto] md:items-center">
+                      <input
+                        value={editor.name}
+                        onChange={(event) => setGroupManagerDrafts((prev) => ({
+                          ...prev,
+                          [group.id]: { ...editor, name: event.target.value },
+                        }))}
+                        className="rounded-2xl border border-[#e7e0d0] px-3 py-2"
+                      />
+                      <input
+                        type="color"
+                        value={editor.color || DEFAULT_GROUP_COLOR}
+                        onChange={(event) => setGroupManagerDrafts((prev) => ({
+                          ...prev,
+                          [group.id]: { ...editor, color: event.target.value },
+                        }))}
+                        className="h-11 w-full rounded-2xl border border-[#e7e0d0] bg-white px-2 py-2"
+                      />
+                      <label className="flex items-center gap-2 text-sm text-[#5f5a52]">
+                        <input
+                          type="checkbox"
+                          checked={editor.isActive}
+                          onChange={(event) => setGroupManagerDrafts((prev) => ({
+                            ...prev,
+                            [group.id]: { ...editor, isActive: event.target.checked },
+                          }))}
+                        />
+                        Active
+                      </label>
+                      <button onClick={() => { void saveManagedGroup(group.id); }} className="rounded-2xl border border-[#e7e0d0] px-4 py-2 text-sm font-semibold">Save</button>
+                      <button onClick={() => { void deleteManagedGroup(group.id); }} className="rounded-2xl border border-[#e7e0d0] px-4 py-2 text-sm font-semibold">Delete</button>
+                    </div>
+                  </div>
+                );
+              })}
+              {!groups.length ? <p className="text-sm text-[#8a8478]">No groups created yet.</p> : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

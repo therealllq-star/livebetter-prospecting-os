@@ -1,5 +1,5 @@
 import { createClient } from "@/utils/supabase/client";
-import { type Lead, type LeadClientSide, type LeadGrade, type LeadStage, type ActivityEntry } from "@/lib/crm";
+import { type Lead, type LeadClientSide, type LeadGrade, type LeadGroup, type LeadStage, type ActivityEntry } from "@/lib/crm";
 
 type SupabaseClient = ReturnType<typeof createClient>;
 
@@ -81,6 +81,27 @@ type SupabaseTaskRecord = {
   created_at?: string;
 };
 
+type SupabaseLeadGroupRecord = {
+  id?: string;
+  name?: string | null;
+  slug?: string | null;
+  color?: string | null;
+  is_active?: boolean | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+type SupabaseLeadGroupAssignmentRecord = {
+  lead_id?: string | null;
+  group_id?: string | null;
+  created_at?: string;
+};
+
+export type SupabaseCrmSnapshot = {
+  leads: Lead[];
+  groups: LeadGroup[];
+};
+
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function isValidSupabaseUuid(value?: string | null) {
@@ -152,6 +173,29 @@ function mapLeadClientSideToSupabase(value?: LeadClientSide | null): "buyer" | "
   return "buyer_seller";
 }
 
+function slugifyLeadGroupName(value: string) {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+
+  return normalized || `group-${Date.now()}`;
+}
+
+function mapSupabaseLeadGroupToLeadGroup(record: SupabaseLeadGroupRecord): LeadGroup {
+  return {
+    id: record.id ?? `group-${Date.now()}`,
+    name: record.name?.trim() || "Unnamed group",
+    slug: record.slug?.trim() || slugifyLeadGroupName(record.name ?? "group"),
+    color: record.color ?? null,
+    isActive: record.is_active ?? true,
+    createdAt: record.created_at ?? new Date().toISOString(),
+    updatedAt: record.updated_at ?? record.created_at ?? new Date().toISOString(),
+  };
+}
+
 const gradeTemperatureMap: Record<LeadGrade, string> = {
   A: "HOT",
   B: "WARM",
@@ -196,7 +240,7 @@ export function mapLeadToSupabaseLead(lead: Lead): SupabaseLeadRecord {
   };
 }
 
-export function mapSupabaseLeadToLead(record: SupabaseLeadRecord, activities: ActivityEntry[], appointmentDate?: string): Lead {
+export function mapSupabaseLeadToLead(record: SupabaseLeadRecord, activities: ActivityEntry[], appointmentDate?: string, groups: LeadGroup[] = []): Lead {
   const grade = temperatureGradeMap[String(record.temperature ?? "WARM").toUpperCase()] ?? "B";
   const stage = statusStageMap[String(record.status ?? "new").toLowerCase()] ?? "New Lead";
   const fullName = [record.first_name, record.last_name].filter(Boolean).join(" ").trim();
@@ -205,6 +249,7 @@ export function mapSupabaseLeadToLead(record: SupabaseLeadRecord, activities: Ac
     id: record.id ?? `lead-${Date.now()}`,
     name: fullName || "Unnamed lead",
     phone: record.phone ?? "",
+    groups,
     grade,
     source: (record.source as Lead["source"]) ?? "Other",
     campaign: record.campaign ?? "",
@@ -249,17 +294,41 @@ export async function inspectSupabaseLeadRead(client: SupabaseClient) {
   };
 }
 
-export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]> {
+export async function fetchSupabaseLeadGroups(client: SupabaseClient): Promise<LeadGroup[]> {
+  const { data, error } = await client
+    .from("lead_groups")
+    .select("*")
+    .order("is_active", { ascending: false })
+    .order("name", { ascending: true });
+
+  if (error) throw new Error(formatSupabaseError(error, "Reading lead groups"));
+
+  return ((data ?? []) as SupabaseLeadGroupRecord[]).map(mapSupabaseLeadGroupToLeadGroup);
+}
+
+export async function fetchSupabaseCrmSnapshot(client: SupabaseClient): Promise<SupabaseCrmSnapshot> {
   const { data: leadRows, error: leadError } = await client.from("leads").select("*").order("created_at", { ascending: false });
   if (leadError) throw new Error(formatSupabaseError(leadError, "Reading leads"));
+
+  const groups = await fetchSupabaseLeadGroups(client);
+  const groupsById = new Map(groups.map((group) => [group.id, group]));
 
   const leadIds = (leadRows ?? []).map((row) => row.id).filter(Boolean);
   let activityRows: SupabaseActivityRecord[] = [];
   let appointmentRows: SupabaseAppointmentRecord[] = [];
+  let assignmentRows: SupabaseLeadGroupAssignmentRecord[] = [];
 
   if (leadIds.length) {
     for (let index = 0; index < leadIds.length; index += LEAD_ID_BATCH_SIZE) {
       const leadIdBatch = leadIds.slice(index, index + LEAD_ID_BATCH_SIZE);
+
+      const { data: leadGroupAssignmentData, error: assignmentError } = await client
+        .from("lead_group_assignments")
+        .select("lead_id, group_id, created_at")
+        .in("lead_id", leadIdBatch);
+
+      if (assignmentError) throw new Error(formatSupabaseError(assignmentError, "Reading lead group assignments"));
+      assignmentRows.push(...((leadGroupAssignmentData ?? []) as SupabaseLeadGroupAssignmentRecord[]));
 
       for (let page = 0; ; page += 1) {
         const from = page * PAGE_SIZE;
@@ -315,6 +384,20 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
     }
   }
 
+  const groupsByLeadId = new Map<string, LeadGroup[]>();
+  assignmentRows.forEach((assignment) => {
+    const leadId = assignment.lead_id?.trim();
+    const groupId = assignment.group_id?.trim();
+    if (!leadId || !groupId) return;
+
+    const matchedGroup = groupsById.get(groupId);
+    if (!matchedGroup || !matchedGroup.isActive) return;
+
+    const existingGroups = groupsByLeadId.get(leadId) ?? [];
+    existingGroups.push(matchedGroup);
+    groupsByLeadId.set(leadId, existingGroups);
+  });
+
   const leadsById = new Map<string, Lead>();
   (leadRows ?? []).forEach((row) => {
     const leadActivities = activityRows
@@ -332,11 +415,17 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
       .filter((item) => item.lead_id === row.id && item.appointment_at)
       .map((item) => item.appointment_at as string)
       .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0];
-    const mappedLead = mapSupabaseLeadToLead(row as SupabaseLeadRecord, leadActivities, latestAppointment);
+    const assignedGroups = (groupsByLeadId.get(row.id) ?? []).slice().sort((left, right) => left.name.localeCompare(right.name));
+    const mappedLead = mapSupabaseLeadToLead(row as SupabaseLeadRecord, leadActivities, latestAppointment, assignedGroups);
     leadsById.set(row.id, mappedLead);
   });
 
-  return Array.from(leadsById.values());
+  return { leads: Array.from(leadsById.values()), groups };
+}
+
+export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]> {
+  const snapshot = await fetchSupabaseCrmSnapshot(client);
+  return snapshot.leads;
 }
 
 function mapActivityTypeFromSupabase(value?: string | null): ActivityEntry["type"] {
@@ -373,7 +462,7 @@ export async function createSupabaseLead(client: SupabaseClient, lead: Lead, use
     throw new Error("Creating the lead succeeded without returning a row from Supabase.");
   }
 
-  return mapSupabaseLeadToLead(data as SupabaseLeadRecord, []);
+  return mapSupabaseLeadToLead(data as SupabaseLeadRecord, [], undefined, lead.groups ?? []);
 }
 
 export async function updateSupabaseLead(client: SupabaseClient, lead: Lead, userId?: string | null) {
@@ -391,7 +480,7 @@ export async function updateSupabaseLead(client: SupabaseClient, lead: Lead, use
     throw new Error("Updating the lead succeeded without returning a row from Supabase.");
   }
 
-  return mapSupabaseLeadToLead(data as SupabaseLeadRecord, []);
+  return mapSupabaseLeadToLead(data as SupabaseLeadRecord, [], undefined, lead.groups ?? []);
 }
 
 export async function deleteSupabaseLead(client: SupabaseClient, leadId: string) {
@@ -488,6 +577,114 @@ export async function createSupabaseConversation(client: SupabaseClient, leadId:
 
   const { error } = await client.from("conversations").insert(payload);
   if (error) throw error;
+}
+
+export async function createSupabaseLeadGroup(client: SupabaseClient, input: { name: string; color?: string | null }) {
+  const name = input.name.trim();
+  if (!name) {
+    throw new Error("Group name is required.");
+  }
+
+  const payload = {
+    name,
+    slug: slugifyLeadGroupName(name),
+    color: input.color?.trim() || null,
+    is_active: true,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { data, error } = await client.from("lead_groups").insert(payload).select("*").single();
+  if (error) throw new Error(formatSupabaseError(error, "Creating the lead group"));
+  if (!data) throw new Error("Creating the lead group succeeded without returning a row from Supabase.");
+
+  return mapSupabaseLeadGroupToLeadGroup(data as SupabaseLeadGroupRecord);
+}
+
+export async function updateSupabaseLeadGroup(
+  client: SupabaseClient,
+  groupId: string,
+  updates: { name?: string; color?: string | null; isActive?: boolean }
+) {
+  if (!isValidSupabaseUuid(groupId)) {
+    throw new Error("Group cannot be updated because the id is not a valid UUID.");
+  }
+
+  const payload: Record<string, string | boolean | null> = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (typeof updates.name === "string") {
+    const trimmedName = updates.name.trim();
+    if (!trimmedName) throw new Error("Group name is required.");
+    payload.name = trimmedName;
+    payload.slug = slugifyLeadGroupName(trimmedName);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(updates, "color")) {
+    payload.color = updates.color?.trim() || null;
+  }
+
+  if (typeof updates.isActive === "boolean") {
+    payload.is_active = updates.isActive;
+  }
+
+  const { data, error } = await client.from("lead_groups").update(payload).eq("id", groupId).select("*").single();
+  if (error) throw new Error(formatSupabaseError(error, "Updating the lead group"));
+  if (!data) throw new Error("Updating the lead group succeeded without returning a row from Supabase.");
+
+  if (updates.isActive === false) {
+    const { error: deleteAssignmentError } = await client.from("lead_group_assignments").delete().eq("group_id", groupId);
+    if (deleteAssignmentError) throw new Error(formatSupabaseError(deleteAssignmentError, "Removing lead group assignments"));
+  }
+
+  return mapSupabaseLeadGroupToLeadGroup(data as SupabaseLeadGroupRecord);
+}
+
+export async function deleteSupabaseLeadGroup(client: SupabaseClient, groupId: string) {
+  if (!isValidSupabaseUuid(groupId)) {
+    throw new Error("Group cannot be deleted because the id is not a valid UUID.");
+  }
+
+  const { error } = await client.from("lead_groups").delete().eq("id", groupId);
+  if (error) throw new Error(formatSupabaseError(error, "Deleting the lead group"));
+}
+
+export async function setSupabaseLeadGroupAssignments(client: SupabaseClient, leadId: string, groupIds: string[]) {
+  if (!isValidSupabaseUuid(leadId)) {
+    throw new Error("Lead groups cannot be updated because the lead id is not a valid UUID.");
+  }
+
+  const normalizedGroupIds = Array.from(new Set(groupIds.filter((groupId) => isValidSupabaseUuid(groupId))));
+  const { data: currentAssignments, error: currentAssignmentError } = await client
+    .from("lead_group_assignments")
+    .select("group_id")
+    .eq("lead_id", leadId);
+
+  if (currentAssignmentError) {
+    throw new Error(formatSupabaseError(currentAssignmentError, "Reading current lead group assignments"));
+  }
+
+  const currentGroupIds = new Set(
+    ((currentAssignments ?? []) as SupabaseLeadGroupAssignmentRecord[])
+      .map((assignment) => assignment.group_id?.trim())
+      .filter((groupId): groupId is string => Boolean(groupId))
+  );
+
+  const nextGroupIds = new Set(normalizedGroupIds);
+  const groupIdsToAdd = normalizedGroupIds.filter((groupId) => !currentGroupIds.has(groupId));
+  const groupIdsToRemove = Array.from(currentGroupIds).filter((groupId) => !nextGroupIds.has(groupId));
+
+  if (groupIdsToAdd.length) {
+    const { error: insertError } = await client.from("lead_group_assignments").insert(
+      groupIdsToAdd.map((groupId) => ({ lead_id: leadId, group_id: groupId }))
+    );
+    if (insertError) throw new Error(formatSupabaseError(insertError, "Assigning lead groups"));
+  }
+
+  if (groupIdsToRemove.length) {
+    const { error: deleteError } = await client.from("lead_group_assignments").delete().eq("lead_id", leadId).in("group_id", groupIdsToRemove);
+    if (deleteError) throw new Error(formatSupabaseError(deleteError, "Removing lead groups"));
+  }
 }
 
 export function getLocalLeadCount() {

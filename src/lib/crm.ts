@@ -16,6 +16,15 @@ export type LeadType =
   | "New Launch Buyer"
   | "Unknown";
 export type LeadClientSide = "Buyer" | "Seller" | "Buyer + Seller";
+export interface LeadGroup {
+  id: string;
+  name: string;
+  slug: string;
+  color?: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
 export type LeadStage =
   | "New Lead"
   | "Attempting Contact"
@@ -53,6 +62,7 @@ export interface Lead {
   id: string;
   name: string;
   phone: string;
+  groups: LeadGroup[];
   grade: LeadGrade;
   source: LeadSource;
   campaign: string;
@@ -141,6 +151,7 @@ export const emptyLead = {
   id: "",
   name: "",
   phone: "",
+  groups: [] as LeadGroup[],
   grade: "B" as LeadGrade,
   source: "Other" as LeadSource,
   campaign: "",
@@ -349,7 +360,7 @@ export function buildDemoLeads(): Lead[] {
         { id: "a7", type: "note", title: "Showflat feedback", details: "Liked the larger balcony option.", createdAt: daysFromNow(-2) },
       ],
     },
-  ];
+  ].map((lead) => ({ ...lead, groups: [] as LeadGroup[] }));
 }
 
 export function normalizePhone(value: string) {
