@@ -202,7 +202,7 @@ export function daysFromNow(days: number) {
 }
 
 export function buildDemoLeads(): Lead[] {
-  return [
+  const demoLeads: Omit<Lead, "groups">[] = [
     {
       id: "demo-1",
       name: "Megan Tan",
@@ -360,7 +360,9 @@ export function buildDemoLeads(): Lead[] {
         { id: "a7", type: "note", title: "Showflat feedback", details: "Liked the larger balcony option.", createdAt: daysFromNow(-2) },
       ],
     },
-  ].map((lead) => ({ ...lead, groups: [] as LeadGroup[] }));
+  ];
+
+  return demoLeads.map((lead) => ({ ...lead, groups: [] as LeadGroup[] }));
 }
 
 export function normalizePhone(value: string) {
