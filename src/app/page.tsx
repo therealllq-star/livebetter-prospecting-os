@@ -1081,6 +1081,44 @@ export default function Home() {
     return [...activities].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
   };
 
+  const formatActivityDateTime = (value?: string) => {
+    if (!value) return "-";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+
+    return date.toLocaleString("en-SG", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+  };
+
+  const getActivityTypeLabel = (type: ActivityEntry["type"]) => {
+    switch (type) {
+      case "note":
+        return "Note";
+      case "call":
+        return "Call";
+      case "whatsapp":
+        return "WhatsApp";
+      case "appointment":
+        return "Appointment";
+      case "follow-up":
+        return "Follow-Up";
+      case "status":
+        return "Status";
+      case "stage":
+        return "Stage";
+      case "grade":
+        return "Grade";
+      default:
+        return "Activity";
+    }
+  };
+
   const buildAiLeoLeadContext = (lead: Lead) => {
     const timeline = [...lead.activity]
       .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime())
@@ -2654,12 +2692,18 @@ export default function Home() {
                     <p className="text-sm uppercase tracking-[0.25em] text-[#b08c2c]">Timeline / activity</p>
                     {timelineError ? <p className="mt-2 text-sm text-[#b08c2c]">{timelineError}</p> : null}
                     <div className="mt-3 space-y-2">
-                      {sortActivitiesNewestFirst(selectedLead.activity).map((entry) => (
-                        <div key={entry.id} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-3 text-sm">
-                          <div className="flex items-center justify-between">
-                            <p className="font-semibold">{entry.title}</p>
-                            <div className="flex items-center gap-3">
-                              <p className="text-xs text-[#5f5a52]">{formatDate(entry.createdAt)}</p>
+                      {sortActivitiesNewestFirst(selectedLead.activity).length === 0 ? (
+                        <p className="rounded-2xl border border-dashed border-[#e7e0d0] bg-[#fcfaef] px-4 py-3 text-sm text-[#5f5a52]">No activity yet</p>
+                      ) : (
+                        sortActivitiesNewestFirst(selectedLead.activity).map((entry) => (
+                          <div key={entry.id} className="rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] p-3 text-sm">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <span className="rounded-full border border-[#e7e0d0] bg-white px-2 py-0.5 text-xs font-semibold text-[#5f5a52]">
+                                  {getActivityTypeLabel(entry.type)}
+                                </span>
+                                <p className="text-xs text-[#5f5a52]">{formatActivityDateTime(entry.createdAt)}</p>
+                              </div>
                               <button
                                 onClick={() => {
                                   void deleteTimelineActivity(selectedLead.id, entry.id);
@@ -2669,10 +2713,12 @@ export default function Home() {
                                 Delete
                               </button>
                             </div>
+                            <p className="mt-2 whitespace-pre-wrap break-words text-sm font-medium leading-relaxed text-[#171717]">
+                              {entry.details || entry.title}
+                            </p>
                           </div>
-                          <p className="mt-1 text-[#5f5a52]">{entry.details}</p>
-                        </div>
-                      ))}
+                        ))
+                      )}
                     </div>
                   </div>
                   <div className="rounded-2xl border border-[#e7e0d0] bg-white p-4">

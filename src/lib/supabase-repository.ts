@@ -398,18 +398,21 @@ export async function fetchSupabaseCrmSnapshot(client: SupabaseClient): Promise<
     groupsByLeadId.set(leadId, existingGroups);
   });
 
+  const activitiesByLeadId = new Map<string, SupabaseActivityRecord[]>();
+  activityRows.forEach((item) => {
+    const leadId = item.lead_id?.trim();
+    if (!leadId) return;
+    const current = activitiesByLeadId.get(leadId) ?? [];
+    current.push(item);
+    activitiesByLeadId.set(leadId, current);
+  });
+
   const leadsById = new Map<string, Lead>();
   (leadRows ?? []).forEach((row) => {
-    const leadActivities = activityRows
-      .filter((item) => item.lead_id === row.id)
-      .map((item) => ({
-        id: item.id ?? `${row.id}-${Math.random()}`,
-        type: mapActivityTypeFromSupabase(item.activity_type),
-        title: item.activity_type ?? "Activity",
-        details: item.description ?? "",
-        createdAt: item.created_at ?? new Date().toISOString(),
-        outcome: undefined,
-      }));
+    const rowLeadId = row.id?.trim() ?? "";
+    const leadActivities = (activitiesByLeadId.get(rowLeadId) ?? [])
+      .map((item) => mapSupabaseActivityToEntry(item, rowLeadId))
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 
     const latestAppointment = appointmentRows
       .filter((item) => item.lead_id === row.id && item.appointment_at)
@@ -429,22 +432,85 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
 }
 
 function mapActivityTypeFromSupabase(value?: string | null): ActivityEntry["type"] {
-  switch (value) {
+  const normalized = normalizeActivityTypeToken(value);
+
+  switch (normalized) {
     case "call":
+    case "called":
       return "call";
     case "whatsapp":
+    case "wa":
       return "whatsapp";
     case "appointment":
+    case "appointment_set":
+    case "appointment-set":
       return "appointment";
     case "note":
       return "note";
     case "follow_up":
+    case "follow-up":
+    case "followup":
       return "follow-up";
+    case "connected":
+    case "no_answer":
+    case "no-answer":
+    case "status":
+    case "stage":
+    case "grade":
+      return "status";
     case "status":
       return "status";
     default:
       return "status";
   }
+}
+
+function normalizeActivityTypeToken(value?: string | null) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_-]/g, "");
+}
+
+function buildActivityTitle(type: ActivityEntry["type"], rawType?: string | null) {
+  const trimmedRawType = rawType?.trim();
+  if (trimmedRawType) {
+    return trimmedRawType
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+  }
+
+  switch (type) {
+    case "note":
+      return "Note";
+    case "call":
+      return "Call";
+    case "whatsapp":
+      return "WhatsApp";
+    case "appointment":
+      return "Appointment";
+    case "follow-up":
+      return "Follow-Up";
+    case "status":
+      return "Status";
+    default:
+      return "Activity";
+  }
+}
+
+function mapSupabaseActivityToEntry(record: SupabaseActivityRecord, leadIdFallback: string): ActivityEntry {
+  const type = mapActivityTypeFromSupabase(record.activity_type);
+  const title = buildActivityTitle(type, record.activity_type);
+
+  return {
+    id: record.id ?? `${leadIdFallback}-${record.created_at ?? Date.now()}`,
+    type,
+    title,
+    details: record.description?.trim() || title,
+    createdAt: record.created_at ?? new Date().toISOString(),
+    outcome: undefined,
+  };
 }
 
 export async function createSupabaseLead(client: SupabaseClient, lead: Lead, userId?: string | null) {
@@ -515,13 +581,12 @@ export async function createSupabaseActivity(client: SupabaseClient, leadId: str
 
   const persisted = data as SupabaseActivityRecord;
   return {
-    id: persisted.id ?? activity.id,
-    type: mapActivityTypeFromSupabase(persisted.activity_type),
-    title: activity.title,
-    details: persisted.description ?? activity.details,
-    createdAt: persisted.created_at ?? activity.createdAt,
+    ...mapSupabaseActivityToEntry(persisted, leadId),
+    // Keep explicit UI intent from the caller when present.
+    title: activity.title?.trim() || buildActivityTitle(mapActivityTypeFromSupabase(persisted.activity_type), persisted.activity_type),
+    details: persisted.description?.trim() || activity.details || activity.title,
     outcome: activity.outcome,
-  } as ActivityEntry;
+  };
 }
 
 function normalizeActivityType(type: ActivityEntry["type"]) {
