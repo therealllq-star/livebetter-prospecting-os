@@ -436,7 +436,7 @@ export default function Home() {
       setIsMasterLeadDrawerOpen(false);
     }
 
-    if (activeView === "Daily Queue") {
+    if (activeView === "Daily Queue" || activeView === "Dashboard") {
       setSelectedLeadId(null);
     }
   }, [activeView]);
