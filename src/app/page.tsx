@@ -435,6 +435,10 @@ export default function Home() {
     if (activeView !== "Master CRM") {
       setIsMasterLeadDrawerOpen(false);
     }
+
+    if (activeView === "Daily Queue") {
+      setSelectedLeadId(null);
+    }
   }, [activeView]);
 
   useEffect(() => {
