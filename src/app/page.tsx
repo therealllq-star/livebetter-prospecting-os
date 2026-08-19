@@ -197,6 +197,9 @@ export default function Home() {
   const [currentQueueLeadId, setCurrentQueueLeadId] = useState<string | null>(null);
   const [queueNoteInput, setQueueNoteInput] = useState("");
   const [detailNoteInput, setDetailNoteInput] = useState("");
+  const [remarksDraft, setRemarksDraft] = useState("");
+  const [isEditingRemarks, setIsEditingRemarks] = useState(false);
+  const [isSavingRemarks, setIsSavingRemarks] = useState(false);
   const [validationMessage, setValidationMessage] = useState("");
   const [timelineError, setTimelineError] = useState<string | null>(null);
   const [aiLeoPrompt, setAiLeoPrompt] = useState("");
@@ -497,6 +500,12 @@ export default function Home() {
   const isMasterCRMView = activeView === "Master CRM";
   const showLeadDetailDrawer = isMasterCRMView && Boolean(selectedLead) && isMasterLeadDrawerOpen;
   const showInlineLeadDetail = Boolean(selectedLead) && !isMasterCRMView;
+
+  useEffect(() => {
+    setIsEditingRemarks(false);
+    setIsSavingRemarks(false);
+    setRemarksDraft(selectedLead?.remarks ?? "");
+  }, [selectedLeadId]);
 
   const markNotificationRead = (notificationId: string) => {
     setInboundNotifications((prev) =>
@@ -1776,6 +1785,34 @@ export default function Home() {
     }
   };
 
+  const startEditingRemarks = () => {
+    setRemarksDraft(selectedLead?.remarks ?? "");
+    setIsEditingRemarks(true);
+  };
+
+  const cancelEditingRemarks = () => {
+    setRemarksDraft(selectedLead?.remarks ?? "");
+    setIsEditingRemarks(false);
+  };
+
+  const saveRemarks = async () => {
+    if (!selectedLead) return;
+
+    try {
+      setIsSavingRemarks(true);
+      await persistLeadMutation(selectedLead.id, { remarks: remarksDraft });
+      setIsEditingRemarks(false);
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Unable to persist remarks to Supabase."
+      );
+    } finally {
+      setIsSavingRemarks(false);
+    }
+  };
+
   const handleLeadAction = async (leadId: string, action: string, options?: { queueMode?: boolean }) => {
     const lead = leads.find((item) => item.id === leadId);
     if (!lead) return;
@@ -2650,8 +2687,45 @@ export default function Home() {
                     <p className="text-sm">Lead type: {selectedLead.leadType}</p>
                     <p className="text-sm">Client side: {selectedLead.clientSide ?? "—"}</p>
                     <div className="mt-3 rounded-2xl border border-[#e7e0d0] bg-white p-3">
-                      <p className="text-xs uppercase tracking-[0.2em] text-[#b08c2c]">Remarks</p>
-                      {selectedLead.remarks && selectedLead.remarks.trim().length > 0 ? (
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs uppercase tracking-[0.2em] text-[#b08c2c]">Remarks</p>
+                        {!isEditingRemarks ? (
+                          <button
+                            onClick={startEditingRemarks}
+                            className="rounded-full border border-[#e7e0d0] px-3 py-1 text-xs font-semibold"
+                          >
+                            Edit
+                          </button>
+                        ) : null}
+                      </div>
+                      {isEditingRemarks ? (
+                        <div className="mt-2 space-y-2">
+                          <textarea
+                            value={remarksDraft}
+                            onChange={(event) => setRemarksDraft(event.target.value)}
+                            className="min-h-[120px] w-full rounded-2xl border border-[#e7e0d0] bg-[#fcfaef] px-3 py-2 text-sm text-[#171717]"
+                            placeholder=""
+                          />
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                void saveRemarks();
+                              }}
+                              disabled={isSavingRemarks}
+                              className="rounded-full bg-[#171717] px-3 py-1 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              {isSavingRemarks ? "Saving..." : "Save"}
+                            </button>
+                            <button
+                              onClick={cancelEditingRemarks}
+                              disabled={isSavingRemarks}
+                              className="rounded-full border border-[#e7e0d0] px-3 py-1 text-xs font-semibold"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : selectedLead.remarks && selectedLead.remarks.trim().length > 0 ? (
                         <p className="mt-2 whitespace-pre-wrap break-words text-sm text-[#171717]">{selectedLead.remarks}</p>
                       ) : (
                         <p className="mt-2 text-sm text-[#5f5a52]">—</p>
