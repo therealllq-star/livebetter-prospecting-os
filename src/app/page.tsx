@@ -2649,6 +2649,14 @@ export default function Home() {
                     <p className="text-sm">Campaign: {selectedLead.campaign}</p>
                     <p className="text-sm">Lead type: {selectedLead.leadType}</p>
                     <p className="text-sm">Client side: {selectedLead.clientSide ?? "—"}</p>
+                    <div className="mt-3 rounded-2xl border border-[#e7e0d0] bg-white p-3">
+                      <p className="text-xs uppercase tracking-[0.2em] text-[#b08c2c]">Remarks</p>
+                      {selectedLead.remarks && selectedLead.remarks.trim().length > 0 ? (
+                        <p className="mt-2 whitespace-pre-wrap break-words text-sm text-[#171717]">{selectedLead.remarks}</p>
+                      ) : (
+                        <p className="mt-2 text-sm text-[#5f5a52]">—</p>
+                      )}
+                    </div>
                   </div>
                   <div className="rounded-2xl border border-[#e7e0d0] bg-white p-4">
                     <div className="flex items-center justify-between gap-3">
