@@ -432,6 +432,8 @@ export default function Home() {
   }, [authChecked, deepLinkLeadId, deepLinkView, isAuthenticated, leads]);
 
   useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+
     if (activeView !== "Master CRM") {
       setIsMasterLeadDrawerOpen(false);
     }
