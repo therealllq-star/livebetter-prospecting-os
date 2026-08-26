@@ -24,6 +24,36 @@ type LeadSubmissionBody = {
   phone?: string;
   email?: string;
   campaign?: string;
+  source?: string;
+  funnelStage?: string;
+  address?: string;
+  town?: string;
+  currentFlatType?: string;
+  indicativeResaleValue?: string | number;
+  upgradingTo?: string;
+  targetAddress?: string;
+  mopStatus?: string;
+  resaleValue?: string | number;
+  leaseStartYear?: string | number;
+  outstandingLoan?: string | number;
+  cpfRefund?: string | number;
+  netCashProceeds?: string | number;
+  targetPrice?: string | number;
+  targetPropType?: string;
+  targetFlatType?: string;
+  loanSource?: string;
+  citizenship?: string;
+  timing?: string;
+  loanRequired?: string | number;
+  monthlyInstalment?: string | number;
+  tdsrPass?: string;
+  msrPass?: string;
+  cashflowDelta?: string | number;
+  income1?: string | number;
+  income2?: string | number;
+  cashSavings?: string | number;
+  cpfAvailable?: string | number;
+  shortfall?: string | number;
   adName?: string;
   landingPage?: string;
   project?: string;
@@ -353,6 +383,44 @@ function parseSubmissionBody(rawBody: string): LeadSubmissionBody | null {
   }
 }
 
+function formatCalculatorRemarks(body: LeadSubmissionBody) {
+  const fields: Array<[string, string | number | undefined]> = [
+    ["Address", body.address],
+    ["Town", body.town],
+    ["Current flat type", body.currentFlatType],
+    ["Indicative resale value", body.indicativeResaleValue],
+    ["Upgrading to", body.upgradingTo],
+    ["Target address", body.targetAddress],
+    ["MOP status", body.mopStatus],
+    ["Resale value", body.resaleValue],
+    ["Lease start year", body.leaseStartYear],
+    ["Outstanding loan", body.outstandingLoan],
+    ["CPF refund", body.cpfRefund],
+    ["Net cash proceeds", body.netCashProceeds],
+    ["Target price", body.targetPrice],
+    ["Target property type", body.targetPropType],
+    ["Target flat type", body.targetFlatType],
+    ["Loan source", body.loanSource],
+    ["Citizenship", body.citizenship],
+    ["Timing", body.timing],
+    ["Loan required", body.loanRequired],
+    ["Monthly instalment", body.monthlyInstalment],
+    ["TDSR result", body.tdsrPass],
+    ["MSR result", body.msrPass],
+    ["Monthly cashflow change", body.cashflowDelta],
+    ["Main applicant income", body.income1],
+    ["Co-applicant income", body.income2],
+    ["Cash savings", body.cashSavings],
+    ["CPF available", body.cpfAvailable],
+    ["Shortfall", body.shortfall],
+  ];
+
+  return fields
+    .filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== "")
+    .map(([label, value]) => `${label}: ${value}`)
+    .join("\n");
+}
+
 async function handleExistingLeadIntakePost(request: Request, rawBody: string) {
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
     console.error("Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
@@ -383,6 +451,8 @@ async function handleExistingLeadIntakePost(request: Request, rawBody: string) {
   const sizeSqft = body.sizeSqft ? parseFloat(String(body.sizeSqft)) : null;
   const currentPsf = body.currentPsf ? parseFloat(String(body.currentPsf)) : null;
   const estimatedValue = sizeSqft && currentPsf ? Math.round(sizeSqft * currentPsf) : null;
+  const isHdbUpgraderCalculator = body.source?.trim().toLowerCase() === "hdb-upgrader-calculator";
+  const calculatorRemarks = isHdbUpgraderCalculator ? formatCalculatorRemarks(body) : "";
 
   const summaryParts = [
     exitScore != null ? `Exit Readiness Score: ${exitScore}/100.` : null,
@@ -401,15 +471,15 @@ async function handleExistingLeadIntakePost(request: Request, rawBody: string) {
     status: "new",
     temperature: temperatureFromScore(exitScore),
     lead_score: exitScore,
-    source: "Exit Risk Tool",
+    source: isHdbUpgraderCalculator ? "HDB Upgrader Calculator" : "Exit Risk Tool",
     campaign: body.campaign || null,
     ad_name: body.adName || null,
-    landing_page: body.landingPage || "exit-risk-analysis-livebettersg.netlify.app",
-    current_property_name: body.project || null,
-    estimated_property_value: estimatedValue,
-    bedrooms: parseBedrooms(body.bedType),
-    ai_summary: summary,
-    notes: summary,
+    landing_page: body.landingPage || (isHdbUpgraderCalculator ? "hdb-upgrader-calculator.netlify.app" : "exit-risk-analysis-livebettersg.netlify.app"),
+    current_property_name: body.project || body.currentFlatType || null,
+    estimated_property_value: estimatedValue ?? body.resaleValue ?? body.indicativeResaleValue ?? null,
+    bedrooms: parseBedrooms(body.bedType || body.currentFlatType),
+    ai_summary: isHdbUpgraderCalculator ? null : summary,
+    notes: calculatorRemarks || summary,
     automation_status: "manual",
     human_handoff_required: true,
     created_at: body.submittedAt || new Date().toISOString(),

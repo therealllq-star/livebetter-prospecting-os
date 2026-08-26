@@ -244,6 +244,7 @@ export function mapSupabaseLeadToLead(record: SupabaseLeadRecord, activities: Ac
   const grade = temperatureGradeMap[String(record.temperature ?? "WARM").toUpperCase()] ?? "B";
   const stage = statusStageMap[String(record.status ?? "new").toLowerCase()] ?? "New Lead";
   const fullName = [record.first_name, record.last_name].filter(Boolean).join(" ").trim();
+  const source = (record.source as Lead["source"]) ?? "Other";
 
   return {
     id: record.id ?? `lead-${Date.now()}`,
@@ -251,9 +252,9 @@ export function mapSupabaseLeadToLead(record: SupabaseLeadRecord, activities: Ac
     phone: record.phone ?? "",
     groups,
     grade,
-    source: (record.source as Lead["source"]) ?? "Other",
+    source,
     campaign: record.campaign ?? "",
-    leadType: "Unknown",
+    leadType: source === "HDB Upgrader Calculator" ? "HDB Upgrader" : "Unknown",
     clientSide: mapSupabaseClientSideToLead(record.client_side) ?? mapOwnershipStructureToClientSide(record.ownership_structure),
     stage,
     lastContact: record.last_contact_at ?? "",

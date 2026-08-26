@@ -1,6 +1,7 @@
 export type LeadGrade = "A" | "B" | "C" | "D";
 export type LeadSource =
   | "Facebook Ads"
+  | "HDB Upgrader Calculator"
   | "PropertyGuru"
   | "Carousell"
   | "Referral"
@@ -129,6 +130,7 @@ export const stages: LeadStage[] = [...v15Stages, ...legacyStages];
 
 export const sources: LeadSource[] = [
   "Facebook Ads",
+  "HDB Upgrader Calculator",
   "PropertyGuru",
   "Carousell",
   "Referral",
