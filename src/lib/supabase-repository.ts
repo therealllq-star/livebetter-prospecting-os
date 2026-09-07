@@ -224,7 +224,20 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
     leadsById.set(row.id, mapSupabaseLeadToLead(row as SupabaseLeadRecord, leadActivities));
   });
 
-  return Array.from(leadsById.values());
+  const mappedLeads = Array.from(leadsById.values());
+
+  if (typeof window !== "undefined") {
+    try {
+      const storageKey = "livebetter-prospecting-os";
+      const stored = window.localStorage.getItem(storageKey);
+      const parsed = stored ? JSON.parse(stored) as { scripts?: unknown } : null;
+      window.localStorage.setItem(storageKey, JSON.stringify({ leads: mappedLeads, scripts: parsed?.scripts }));
+    } catch {
+      // Keep the Supabase result usable even if localStorage is unavailable.
+    }
+  }
+
+  return mappedLeads;
 }
 
 function mapActivityTypeFromSupabase(value?: string | null): ActivityEntry["type"] {
