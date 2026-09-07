@@ -116,6 +116,8 @@ export default function Home() {
       }
 
       const leadsFromSupabase = await fetchSupabaseLeads(client);
+      setLeads(leadsFromSupabase);
+      if (leadsFromSupabase[0]) setSelectedLeadId(leadsFromSupabase[0].id);
       setSupabaseReadState({
         status: "connected",
         authenticated: true,
