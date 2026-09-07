@@ -18,19 +18,30 @@ const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 // env var unset to disable this check entirely.
 const INTAKE_SECRET = process.env.LEAD_INTAKE_SECRET;
 
-// Only the exact landing page domain may call this from a browser.
-const ALLOWED_ORIGIN = "https://exit-risk-analysis-livebettersg.netlify.app";
+// Browser origins allowed to submit leads. Keep the legacy Netlify origin
+// working while also allowing the live custom domain.
+const ALLOWED_ORIGINS = new Set([
+  "https://livebettersg.com",
+  "https://www.livebettersg.com",
+  "https://exit-risk-analysis-livebettersg.netlify.app",
+]);
 
-function corsHeaders() {
+function corsHeaders(origin = "") {
+  const allowedOrigin = ALLOWED_ORIGINS.has(origin)
+    ? origin
+    : "https://livebettersg.com";
+
   return {
-    "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+    "Access-Control-Allow-Origin": allowedOrigin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, x-intake-secret",
+    "Vary": "Origin",
   };
 }
 
-export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: corsHeaders() });
+export async function OPTIONS(request) {
+  const origin = request.headers.get("origin") || "";
+  return new NextResponse(null, { status: 204, headers: corsHeaders(origin) });
 }
 
 function splitName(fullName) {
@@ -54,15 +65,18 @@ function parseBedrooms(bedType) {
 }
 
 export async function POST(request) {
+  const origin = request.headers.get("origin") || "";
+  const headers = corsHeaders(origin);
+
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
     console.error("Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-    return NextResponse.json({ error: "Server not configured" }, { status: 500, headers: corsHeaders() });
+    return NextResponse.json({ error: "Server not configured" }, { status: 500, headers });
   }
 
   if (INTAKE_SECRET) {
     const provided = request.headers.get("x-intake-secret");
     if (provided !== INTAKE_SECRET) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders() });
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers });
     }
   }
 
@@ -70,11 +84,11 @@ export async function POST(request) {
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400, headers: corsHeaders() });
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400, headers });
   }
 
   if (!body?.name || !body?.phone) {
-    return NextResponse.json({ error: "name and phone are required" }, { status: 400, headers: corsHeaders() });
+    return NextResponse.json({ error: "name and phone are required" }, { status: 400, headers });
   }
 
   const { first, last } = splitName(body.name);
@@ -89,6 +103,7 @@ export async function POST(request) {
     body.bedType ? `${body.bedType}${sizeSqft ? `, ${sizeSqft} sqft` : ""}.` : null,
     body.entryPrice ? `Entry price: $${body.entryPrice}.` : null,
     currentPsf ? `Current PSF: $${currentPsf}.` : null,
+    body.objective ? `Objective: ${body.objective}.` : null,
   ].filter(Boolean);
   const summary = summaryParts.join(" ") || null;
 
@@ -100,10 +115,10 @@ export async function POST(request) {
     status: "new",
     temperature: temperatureFromScore(exitScore),
     lead_score: exitScore,
-    source: "Exit Risk Tool",
+    source: body.source || "Property Opportunity Website",
     campaign: body.campaign || null,
     ad_name: body.adName || null,
-    landing_page: body.landingPage || "exit-risk-analysis-livebettersg.netlify.app",
+    landing_page: body.landingPage || "https://livebettersg.com/",
     current_property_name: body.project || null,
     estimated_property_value: estimatedValue,
     bedrooms: parseBedrooms(body.bedType),
@@ -123,8 +138,8 @@ export async function POST(request) {
 
   if (error) {
     console.error("Failed to insert lead:", error);
-    return NextResponse.json({ error: "Failed to save lead" }, { status: 500, headers: corsHeaders() });
+    return NextResponse.json({ error: "Failed to save lead" }, { status: 500, headers });
   }
 
-  return NextResponse.json({ ok: true, id: data.id }, { headers: corsHeaders() });
+  return NextResponse.json({ ok: true, id: data.id }, { headers });
 }
