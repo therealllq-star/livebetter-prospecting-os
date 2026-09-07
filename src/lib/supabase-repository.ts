@@ -116,6 +116,11 @@ const temperatureGradeMap: Record<string, LeadGrade> = {
   LOW: "D",
 };
 
+let lastKnownLeadIds = new Set<string>();
+let syncWatcherStarted = false;
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+let syncingDeletedIds = new Set<string>();
+
 export function mapLeadToSupabaseLead(lead: Lead): SupabaseLeadRecord {
   const [firstName, ...lastNameParts] = lead.name.trim().split(/\s+/);
   return {
@@ -197,6 +202,83 @@ export async function inspectSupabaseLeadRead(client: SupabaseClient) {
   };
 }
 
+async function deleteSupabaseLead(client: SupabaseClient, leadId: string) {
+  if (!leadId || leadId.startsWith("lead-") || leadId.startsWith("demo-")) return;
+  if (syncingDeletedIds.has(leadId)) return;
+  syncingDeletedIds.add(leadId);
+  try {
+    const { error } = await client.from("leads").delete().eq("id", leadId);
+    if (error) console.error("Failed to delete Supabase lead:", error);
+  } finally {
+    syncingDeletedIds.delete(leadId);
+  }
+}
+
+function notifyNewLead(name: string) {
+  if (typeof window === "undefined") return;
+  document.title = `🔔 New Lead · ${name} · Live Better SG`;
+  window.setTimeout(() => {
+    if (document.visibilityState === "visible") document.title = "Live Better SG · Prospecting OS";
+  }, 8000);
+
+  if ("Notification" in window && Notification.permission === "granted") {
+    new Notification("New lead received", {
+      body: `${name} just submitted a property enquiry.`,
+    });
+  }
+}
+
+function startSyncWatcher(client: SupabaseClient) {
+  if (typeof window === "undefined" || syncWatcherStarted) return;
+  syncWatcherStarted = true;
+
+  const originalSetItem = window.localStorage.setItem.bind(window.localStorage);
+  window.localStorage.setItem = (key: string, value: string) => {
+    originalSetItem(key, value);
+    if (key !== "livebetter-prospecting-os") return;
+
+    try {
+      const parsed = JSON.parse(value) as { leads?: Lead[] };
+      const currentIds = new Set((parsed.leads ?? []).map((lead) => lead.id));
+      const deletedIds = [...lastKnownLeadIds].filter((id) => !currentIds.has(id));
+      void Promise.all(deletedIds.map((id) => deleteSupabaseLead(client, id)));
+      for (const id of currentIds) lastKnownLeadIds.add(id);
+      for (const id of [...lastKnownLeadIds]) {
+        if (!currentIds.has(id)) lastKnownLeadIds.delete(id);
+      }
+    } catch {
+      // Ignore malformed local storage writes.
+    }
+  };
+
+  pollTimer = window.setInterval(async () => {
+    try {
+      const { data, error } = await client
+        .from("leads")
+        .select("id, first_name, last_name, created_at")
+        .order("created_at", { ascending: false });
+      if (error || !data) return;
+
+      const rows = data as Array<{ id: string; first_name?: string | null; last_name?: string | null; created_at?: string | null }>;
+      const currentIds = new Set(rows.map((row) => row.id));
+      const newRows = rows.filter((row) => !lastKnownLeadIds.has(row.id));
+
+      if (lastKnownLeadIds.size && newRows.length) {
+        const newest = newRows[0];
+        const name = [newest.first_name, newest.last_name].filter(Boolean).join(" ") || "New lead";
+        notifyNewLead(name);
+        await fetchSupabaseLeads(client);
+        window.location.reload();
+        return;
+      }
+
+      lastKnownLeadIds = currentIds;
+    } catch {
+      // Keep the CRM usable if polling is temporarily unavailable.
+    }
+  }, 15000);
+}
+
 export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]> {
   const { data: leadRows, error: leadError } = await client.from("leads").select("*").order("created_at", { ascending: false });
   if (leadError) throw leadError;
@@ -225,6 +307,8 @@ export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]
   });
 
   const mappedLeads = Array.from(leadsById.values());
+  lastKnownLeadIds = new Set(mappedLeads.map((lead) => lead.id));
+  startSyncWatcher(client);
 
   if (typeof window !== "undefined") {
     try {
