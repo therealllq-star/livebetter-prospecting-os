@@ -4,22 +4,11 @@ import { createClient } from "@supabase/supabase-js";
 export const runtime = "nodejs";
 
 // These are read from Vercel's environment variables — never hard-code
-// secrets in this file. NEXT_PUBLIC_SUPABASE_URL already exists (the rest
-// of the app uses it); SUPABASE_SERVICE_ROLE_KEY needs to be added fresh in
-// Vercel (Project Settings -> Environment Variables). The service role key
-// bypasses Row Level Security, which is exactly why it must only ever be
-// used here on the server, never sent to the browser.
+// secrets in this file. The service role key stays server-side only.
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// Optional lightweight spam guard — not real security (it's visible in the
-// landing page's public JS anyway), just enough to stop generic bots that
-// scan for open POST endpoints and blast them with junk. Leave the Vercel
-// env var unset to disable this check entirely.
-const INTAKE_SECRET = process.env.LEAD_INTAKE_SECRET;
-
-// Browser origins allowed to submit leads. Keep the legacy Netlify origin
-// working while also allowing the live custom domain.
+// Browser origins allowed to submit leads.
 const ALLOWED_ORIGINS = new Set([
   "https://livebettersg.com",
   "https://www.livebettersg.com",
@@ -34,7 +23,7 @@ function corsHeaders(origin = "") {
   return {
     "Access-Control-Allow-Origin": allowedOrigin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, x-intake-secret",
+    "Access-Control-Allow-Headers": "Content-Type",
     "Vary": "Origin",
   };
 }
@@ -89,13 +78,6 @@ export async function POST(request: Request) {
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
     console.error("Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
     return NextResponse.json({ error: "Server not configured" }, { status: 500, headers });
-  }
-
-  if (INTAKE_SECRET) {
-    const provided = request.headers.get("x-intake-secret");
-    if (provided !== INTAKE_SECRET) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers });
-    }
   }
 
   let body: LeadBody;
