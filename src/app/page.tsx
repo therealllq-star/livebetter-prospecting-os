@@ -227,7 +227,7 @@ export default function Home() {
   const openLead = (lead: Lead) => {
     setSelectedLeadId(lead.id);
     setFocusLeadId(lead.id);
-    setActiveView("Daily Queue");
+    setActiveView("Master CRM");
   };
 
   const updateLead = (leadId: string, updates: Partial<Lead>) => {
