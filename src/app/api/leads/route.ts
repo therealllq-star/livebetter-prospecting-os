@@ -3,12 +3,9 @@ import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 
-// These are read from Vercel's environment variables — never hard-code
-// secrets in this file. The service role key stays server-side only.
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// Browser origins allowed to submit leads.
 const ALLOWED_ORIGINS = new Set([
   "https://livebettersg.com",
   "https://www.livebettersg.com",
@@ -138,7 +135,10 @@ export async function POST(request: Request) {
 
   if (error) {
     console.error("Failed to insert lead:", error);
-    return NextResponse.json({ error: "Failed to save lead" }, { status: 500, headers });
+    return NextResponse.json(
+      { error: "Failed to save lead", detail: error.message, code: error.code, hint: error.hint || null },
+      { status: 500, headers }
+    );
   }
 
   return NextResponse.json({ ok: true, id: data.id }, { headers });
