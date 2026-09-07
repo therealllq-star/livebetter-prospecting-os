@@ -120,6 +120,7 @@ let lastKnownLeadIds = new Set<string>();
 let syncWatcherStarted = false;
 let pollTimer: number | null = null;
 let syncingDeletedIds = new Set<string>();
+let notificationPromptStarted = false;
 
 export function mapLeadToSupabaseLead(lead: Lead): SupabaseLeadRecord {
   const [firstName, ...lastNameParts] = lead.name.trim().split(/\s+/);
@@ -214,8 +215,27 @@ async function deleteSupabaseLead(client: SupabaseClient, leadId: string) {
   }
 }
 
+function startNotificationPermissionPrompt() {
+  if (typeof window === "undefined" || !("Notification" in window) || notificationPromptStarted) return;
+  notificationPromptStarted = true;
+
+  if (Notification.permission !== "default") return;
+
+  const requestPermission = () => {
+    if (Notification.permission === "default") {
+      void Notification.requestPermission();
+    }
+    window.removeEventListener("pointerdown", requestPermission);
+    window.removeEventListener("keydown", requestPermission);
+  };
+
+  window.addEventListener("pointerdown", requestPermission, { once: true });
+  window.addEventListener("keydown", requestPermission, { once: true });
+}
+
 function notifyNewLead(name: string) {
   if (typeof window === "undefined") return;
+
   document.title = `🔔 New Lead · ${name} · Live Better SG`;
   window.setTimeout(() => {
     if (document.visibilityState === "visible") document.title = "Live Better SG · Prospecting OS";
@@ -224,6 +244,7 @@ function notifyNewLead(name: string) {
   if ("Notification" in window && Notification.permission === "granted") {
     new Notification("New lead received", {
       body: `${name} just submitted a property enquiry.`,
+      tag: "live-better-new-lead",
     });
   }
 }
@@ -231,6 +252,7 @@ function notifyNewLead(name: string) {
 function startSyncWatcher(client: SupabaseClient) {
   if (typeof window === "undefined" || syncWatcherStarted) return;
   syncWatcherStarted = true;
+  startNotificationPermissionPrompt();
 
   const originalSetItem = window.localStorage.setItem.bind(window.localStorage);
   window.localStorage.setItem = (key: string, value: string) => {
@@ -241,11 +263,10 @@ function startSyncWatcher(client: SupabaseClient) {
       const parsed = JSON.parse(value) as { leads?: Lead[] };
       const currentIds = new Set((parsed.leads ?? []).map((lead) => lead.id));
       const deletedIds = [...lastKnownLeadIds].filter((id) => !currentIds.has(id));
+
       void Promise.all(deletedIds.map((id) => deleteSupabaseLead(client, id)));
-      for (const id of currentIds) lastKnownLeadIds.add(id);
-      for (const id of [...lastKnownLeadIds]) {
-        if (!currentIds.has(id)) lastKnownLeadIds.delete(id);
-      }
+
+      lastKnownLeadIds = currentIds;
     } catch {
       // Ignore malformed local storage writes.
     }
@@ -276,7 +297,7 @@ function startSyncWatcher(client: SupabaseClient) {
     } catch {
       // Keep the CRM usable if polling is temporarily unavailable.
     }
-  }, 15000);
+  }, 10000);
 }
 
 export async function fetchSupabaseLeads(client: SupabaseClient): Promise<Lead[]> {
