@@ -118,7 +118,7 @@ const temperatureGradeMap: Record<string, LeadGrade> = {
 
 let lastKnownLeadIds = new Set<string>();
 let syncWatcherStarted = false;
-let pollTimer: ReturnType<typeof setInterval> | null = null;
+let pollTimer: number | null = null;
 let syncingDeletedIds = new Set<string>();
 
 export function mapLeadToSupabaseLead(lead: Lead): SupabaseLeadRecord {
