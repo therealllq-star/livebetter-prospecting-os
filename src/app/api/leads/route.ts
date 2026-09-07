@@ -39,32 +39,50 @@ function corsHeaders(origin = "") {
   };
 }
 
-export async function OPTIONS(request) {
+export async function OPTIONS(request: Request) {
   const origin = request.headers.get("origin") || "";
   return new NextResponse(null, { status: 204, headers: corsHeaders(origin) });
 }
 
-function splitName(fullName) {
-  const trimmed = (fullName || "").trim();
+type LeadBody = {
+  name?: string;
+  phone?: string;
+  email?: string;
+  objective?: string;
+  source?: string;
+  campaign?: string;
+  adName?: string;
+  landingPage?: string;
+  submittedAt?: string;
+  exitScore?: string | number;
+  sizeSqft?: string | number;
+  currentPsf?: string | number;
+  project?: string;
+  bedType?: string;
+  entryPrice?: string | number;
+};
+
+function splitName(fullName: string) {
+  const trimmed = fullName.trim();
   const parts = trimmed.split(/\s+/).filter(Boolean);
   const first = parts.shift();
   return { first: first || "Unknown", last: parts.join(" ") || null };
 }
 
-function temperatureFromScore(score) {
+function temperatureFromScore(score: number | null) {
   if (score == null || Number.isNaN(score)) return "WARM";
   if (score >= 70) return "HOT";
   if (score >= 45) return "WARM";
   return "NURTURE";
 }
 
-function parseBedrooms(bedType) {
+function parseBedrooms(bedType: string | undefined) {
   if (!bedType) return null;
-  const match = String(bedType).match(/\d+/);
+  const match = bedType.match(/\d+/);
   return match ? parseInt(match[0], 10) : null;
 }
 
-export async function POST(request) {
+export async function POST(request: Request) {
   const origin = request.headers.get("origin") || "";
   const headers = corsHeaders(origin);
 
@@ -80,7 +98,7 @@ export async function POST(request) {
     }
   }
 
-  let body;
+  let body: LeadBody;
   try {
     body = await request.json();
   } catch {
@@ -93,8 +111,8 @@ export async function POST(request) {
 
   const { first, last } = splitName(body.name);
   const exitScore = body.exitScore != null && body.exitScore !== "" ? parseInt(String(body.exitScore), 10) : null;
-  const sizeSqft = body.sizeSqft ? parseFloat(body.sizeSqft) : null;
-  const currentPsf = body.currentPsf ? parseFloat(body.currentPsf) : null;
+  const sizeSqft = body.sizeSqft ? parseFloat(String(body.sizeSqft)) : null;
+  const currentPsf = body.currentPsf ? parseFloat(String(body.currentPsf)) : null;
   const estimatedValue = sizeSqft && currentPsf ? Math.round(sizeSqft * currentPsf) : null;
 
   const summaryParts = [
