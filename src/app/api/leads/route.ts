@@ -262,6 +262,11 @@ function buildMetaLeadPayload(eventValue: MetaWebhookEventValue, leadDetails: Me
   const formId = eventValue.form_id || leadDetails.form_id || null;
   const pageId = eventValue.page_id || leadDetails.page_id || null;
   const createdAt = parseCreatedAt(eventValue.created_time || leadDetails.created_time);
+  const contactFieldNames = new Set(["full_name", "first_name", "last_name", "email", "phone_number", "phone"]);
+  const formAnswerNotes = (leadDetails.field_data ?? [])
+    .filter((field) => field.name && !contactFieldNames.has(field.name.trim().toLowerCase()))
+    .map((field) => `${field.name!.trim()}: ${(field.values ?? []).join(", ")}`)
+    .filter((line) => line.split(": ")[1]);
 
   return {
     meta_lead_id: eventValue.leadgen_id || leadDetails.id || null,
@@ -284,7 +289,8 @@ function buildMetaLeadPayload(eventValue: MetaWebhookEventValue, leadDetails: Me
       adId ? `ad_id=${adId}` : null,
       formId ? `form_id=${formId}` : null,
       pageId ? `page_id=${pageId}` : null,
-    ].filter(Boolean).join(" "),
+      ...formAnswerNotes,
+    ].filter(Boolean).join("\n"),
     automation_status: "manual",
     human_handoff_required: true,
     created_at: createdAt,
