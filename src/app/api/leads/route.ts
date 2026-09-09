@@ -471,7 +471,7 @@ async function handleExistingLeadIntakePost(request: Request, rawBody: string) {
     status: "new",
     temperature: temperatureFromScore(exitScore),
     lead_score: exitScore,
-    source: isHdbUpgraderCalculator ? "HDB Upgrader Calculator" : "Exit Risk Tool",
+    source: isHdbUpgraderCalculator ? "HDB Upgrader Calculator" : "Facebook Ads",
     campaign: body.campaign || null,
     ad_name: body.adName || null,
     landing_page: body.landingPage || (isHdbUpgraderCalculator ? "hdb-upgrader-calculator.netlify.app" : "exit-risk-analysis-livebettersg.netlify.app"),
