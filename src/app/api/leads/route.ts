@@ -16,8 +16,11 @@ const META_PAGE_ACCESS_TOKEN = process.env.META_PAGE_ACCESS_TOKEN;
 const META_API_VERSION = process.env.META_API_VERSION || "v23.0";
 const META_ALLOWED_PAGE_IDS = process.env.META_ALLOWED_PAGE_IDS;
 
-// Only the landing-page origin may call this endpoint from a browser.
-const ALLOWED_ORIGIN = "https://exit-risk-analysis-livebettersg.netlify.app";
+// Only the landing-page origins may call this endpoint from a browser.
+const ALLOWED_ORIGINS = new Set([
+  "https://exit-risk-analysis-livebettersg.netlify.app",
+  "https://save300knewlaunches.netlify.app",
+]);
 
 type LeadSubmissionBody = {
   name?: string;
@@ -102,16 +105,20 @@ type MetaLeadDetails = {
   field_data?: MetaLeadField[];
 };
 
-function corsHeaders(): Record<string, string> {
+function corsHeaders(origin: string | null): Record<string, string> {
+  const allowedOrigin = origin && ALLOWED_ORIGINS.has(origin)
+    ? origin
+    : "https://exit-risk-analysis-livebettersg.netlify.app";
   return {
-    "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+    "Access-Control-Allow-Origin": allowedOrigin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, x-intake-secret",
+    Vary: "Origin",
   };
 }
 
-export async function OPTIONS(): Promise<NextResponse> {
-  return new NextResponse(null, { status: 204, headers: corsHeaders() });
+export async function OPTIONS(request: Request): Promise<NextResponse> {
+  return new NextResponse(null, { status: 204, headers: corsHeaders(request.headers.get("origin")) });
 }
 
 function splitName(fullName: string | undefined): { first: string; last: string | null } {
@@ -424,26 +431,26 @@ function formatCalculatorRemarks(body: LeadSubmissionBody) {
 async function handleExistingLeadIntakePost(request: Request, rawBody: string) {
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
     console.error("Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-    return NextResponse.json({ error: "Server not configured" }, { status: 500, headers: corsHeaders() });
+    return NextResponse.json({ error: "Server not configured" }, { status: 500, headers: corsHeaders(request.headers.get("origin")) });
   }
 
   if (!INTAKE_SECRET) {
     console.error("Missing LEAD_INTAKE_SECRET");
-    return NextResponse.json({ error: "Server not configured" }, { status: 500, headers: corsHeaders() });
+    return NextResponse.json({ error: "Server not configured" }, { status: 500, headers: corsHeaders(request.headers.get("origin")) });
   }
 
   const provided = request.headers.get("x-intake-secret");
   if (provided !== INTAKE_SECRET) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders() });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders(request.headers.get("origin")) });
   }
 
   const body = parseSubmissionBody(rawBody);
   if (!body) {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400, headers: corsHeaders() });
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400, headers: corsHeaders(request.headers.get("origin")) });
   }
 
   if (!body.name || !body.phone) {
-    return NextResponse.json({ error: "name and phone are required" }, { status: 400, headers: corsHeaders() });
+    return NextResponse.json({ error: "name and phone are required" }, { status: 400, headers: corsHeaders(request.headers.get("origin")) });
   }
 
   const { first, last } = splitName(body.name);
@@ -494,10 +501,10 @@ async function handleExistingLeadIntakePost(request: Request, rawBody: string) {
 
   if (error) {
     console.error("Failed to insert lead:", error);
-    return NextResponse.json({ error: "Failed to save lead" }, { status: 500, headers: corsHeaders() });
+    return NextResponse.json({ error: "Failed to save lead" }, { status: 500, headers: corsHeaders(request.headers.get("origin")) });
   }
 
-  return NextResponse.json({ ok: true, id: data.id }, { headers: corsHeaders() });
+  return NextResponse.json({ ok: true, id: data.id }, { headers: corsHeaders(request.headers.get("origin")) });
 }
 
 export async function GET(request: Request): Promise<NextResponse> {
