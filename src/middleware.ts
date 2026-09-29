@@ -4,6 +4,7 @@ import { createClient } from "@/utils/supabase/middleware";
 export async function middleware(request: NextRequest) {
   if (
     request.nextUrl.pathname === "/api/leads" ||
+    request.nextUrl.pathname === "/api/leads/public" ||
     request.nextUrl.pathname === "/api/push/dispatch" ||
     request.nextUrl.pathname === "/sw.js"
   ) {
