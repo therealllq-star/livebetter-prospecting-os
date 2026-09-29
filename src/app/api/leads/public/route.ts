@@ -9,6 +9,7 @@ const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const ALLOWED_ORIGINS = new Set([
   "https://livebettersg.com",
   "https://www.livebettersg.com",
+  "https://save300knewlaunches.netlify.app",
 ]);
 
 type LeadSubmissionBody = {
