@@ -10,6 +10,7 @@ const ALLOWED_ORIGINS = new Set([
   "https://livebettersg.com",
   "https://www.livebettersg.com",
   "https://save300knewlaunches.netlify.app",
+  "https://hdb-valuation-livebettersg.netlify.app",
 ]);
 
 type LeadSubmissionBody = {
@@ -26,6 +27,14 @@ type LeadSubmissionBody = {
   entryPrice?: string | number;
   exitScore?: string | number;
   submittedAt?: string;
+  postal?: string | number;
+  floor?: string | number;
+  flat_type?: string;
+  block?: string;
+  street?: string;
+  address?: string;
+  town?: string;
+  lease?: string | number;
 };
 
 function corsHeaders(origin: string | null): Record<string, string> {
@@ -100,6 +109,21 @@ export async function POST(request: Request): Promise<NextResponse> {
   ].filter(Boolean);
 
   const summary = summaryParts.join(" ") || null;
+  const locationDetails = [
+    ["Postal", body.postal],
+    ["Floor", body.floor],
+    ["Flat type", body.flat_type],
+    ["Block", body.block],
+    ["Street", body.street],
+    ["Address", body.address],
+    ["Town", body.town],
+    ["Lease", body.lease],
+  ]
+    .filter(([, value]) => value != null && String(value).trim())
+    .map(([label, value]) => `${label}: ${String(value).trim()}`);
+  const notes = [summary, ...locationDetails]
+    .filter((part): part is string => Boolean(part))
+    .join("\n") || null;
 
   const payload = {
     first_name: first,
@@ -117,7 +141,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     estimated_property_value: estimatedValue,
     bedrooms: parseBedrooms(body.bedType),
     ai_summary: summary,
-    notes: summary,
+    notes,
     automation_status: "manual",
     human_handoff_required: true,
     created_at: body.submittedAt || new Date().toISOString(),
