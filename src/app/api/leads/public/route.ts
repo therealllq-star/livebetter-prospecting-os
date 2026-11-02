@@ -11,6 +11,7 @@ const ALLOWED_ORIGINS = new Set([
   "https://www.livebettersg.com",
   "https://save300knewlaunches.netlify.app",
   "https://hdb-valuation-livebettersg.netlify.app",
+  "https://condo-valuation-livebettersg.netlify.app",
   "https://livebettersgbuyer.netlify.app",
   "https://livebetterbuyer.netlify.app",
 ]);
