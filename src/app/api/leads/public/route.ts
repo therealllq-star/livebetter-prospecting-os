@@ -11,6 +11,8 @@ const ALLOWED_ORIGINS = new Set([
   "https://www.livebettersg.com",
   "https://save300knewlaunches.netlify.app",
   "https://hdb-valuation-livebettersg.netlify.app",
+  "https://livebettersgbuyer.netlify.app",
+  "https://livebetterbuyer.netlify.app",
 ]);
 
 type LeadSubmissionBody = {
@@ -35,6 +37,11 @@ type LeadSubmissionBody = {
   address?: string;
   town?: string;
   lease?: string | number;
+  buyerType?: string;
+  propertyType?: string;
+  budget?: string;
+  timeline?: string;
+  adContent?: string;
 };
 
 function corsHeaders(origin: string | null): Record<string, string> {
@@ -118,6 +125,11 @@ export async function POST(request: Request): Promise<NextResponse> {
     ["Address", body.address],
     ["Town", body.town],
     ["Lease", body.lease],
+    ["Buyer type", body.buyerType],
+    ["Looking at", body.propertyType],
+    ["Budget", body.budget],
+    ["Timeline", body.timeline],
+    ["Ad", body.adContent],
   ]
     .filter(([, value]) => value != null && String(value).trim())
     .map(([label, value]) => `${label}: ${String(value).trim()}`);
@@ -131,7 +143,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     phone: body.phone,
     email: body.email || null,
     status: "new",
-    temperature: temperatureFromScore(exitScore),
+    temperature: body.timeline === "Within 3 months" ? "HOT" : temperatureFromScore(exitScore),
     lead_score: exitScore,
     source: body.source || "Property Opportunity Website",
     campaign: body.campaign || null,
