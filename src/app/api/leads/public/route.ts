@@ -10,6 +10,7 @@ const ALLOWED_ORIGINS = new Set([
   "https://livebettersg.com",
   "https://www.livebettersg.com",
   "https://save300knewlaunches.netlify.app",
+  "https://livebettersgbuyer.netlify.app"
   "https://hdb-valuation-livebettersg.netlify.app",
 ]);
 
